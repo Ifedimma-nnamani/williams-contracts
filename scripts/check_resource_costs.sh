@@ -34,8 +34,31 @@ extract_table() {
   awk '/^\| entry point \|/{flag=1} flag && /^\|/{print} flag && !/^\|/{flag=0}'
 }
 
+# Preflight: the profile is produced by a Cargo test run, so Cargo must be
+# present before any work happens. Report the missing executable explicitly so
+# contributors can tell an unmet local prerequisite from a repository
+# regression (issue #260).
+if ! command -v cargo >/dev/null 2>&1; then
+  echo "ERROR: required executable 'cargo' was not found on PATH." >&2
+  echo "       Resource-cost profiling needs Cargo to run:" >&2
+  echo "         cargo test -p will --lib profile -- --nocapture" >&2
+  echo "       Install a Rust toolchain (https://rustup.rs) and re-run this script." >&2
+  exit 127
+fi
+
 echo "Running the resource-cost profile..."
-profile_output="$(cargo test -p will --lib profile -- --nocapture 2>&1)"
+# Capture combined output without letting `set -e` abort the script from inside
+# the command substitution: an installed-but-failing Cargo must surface its
+# diagnostics (and original exit status) rather than exiting silently.
+profile_status=0
+profile_output="$(cargo test -p will --lib profile -- --nocapture 2>&1)" || profile_status=$?
+
+if [ "$profile_status" -ne 0 ]; then
+  echo "ERROR: 'cargo test -p will --lib profile -- --nocapture' failed with exit status ${profile_status}." >&2
+  echo "       Captured output follows:" >&2
+  printf '%s\n' "$profile_output" >&2
+  exit "$profile_status"
+fi
 
 generated_table="$(printf '%s\n' "$profile_output" | extract_table)"
 committed_table="$(extract_table < docs/RESOURCE_COSTS.md)"

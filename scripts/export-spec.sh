@@ -30,16 +30,33 @@ elif [[ -n "${1:-}" ]]; then
   exit 2
 fi
 
-if command -v cargo >/dev/null 2>&1; then
-  version="$(cargo metadata --no-deps --format-version 1 \
-    | jq -r '.packages[] | select(.name=="will") | .version')"
-else
-  version="$(sed -nE 's/^version[[:space:]]*=[[:space:]]*"([^"]+)".*/\1/p' contracts/will/Cargo.toml | head -n 1)"
+stellar_bin="${STELLAR_BIN:-stellar}"
+
+# ── Preflight ────────────────────────────────────────────────────────────────
+# Fail before any build or output work when a required executable is missing,
+# so contributors can tell an unmet local prerequisite from a repo regression.
+missing_tools=()
+for tool in cargo jq "${stellar_bin}"; do
+  if ! command -v "${tool}" >/dev/null 2>&1; then
+    missing_tools+=("${tool}")
+  fi
+done
+if (( ${#missing_tools[@]} > 0 )); then
+  for tool in "${missing_tools[@]}"; do
+    echo "ERROR: required executable '${tool}' was not found on PATH." >&2
+  done
+  echo "Install the missing tool(s) and re-run scripts/export-spec.sh." >&2
+  echo "  cargo:   https://rustup.rs" >&2
+  echo "  jq:      https://jqlang.github.io/jq/download/" >&2
+  echo "  stellar: cargo install --locked stellar-cli" >&2
+  exit 1
 fi
+
+version="$(cargo metadata --no-deps --format-version 1 \
+  | jq -r '.packages[] | select(.name=="will") | .version')"
 
 wasm_path="target/wasm32v1-none/release/will.wasm"
 out_path="spec/will-v${version}.json"
-stellar_bin="${STELLAR_BIN:-stellar}"
 
 echo "Building will contract (release, wasm32v1-none)..."
 SOROBAN_SDK_BUILD_SYSTEM_SUPPORTS_SPEC_SHAKING_V2=1 cargo build -p will --release --target wasm32v1-none

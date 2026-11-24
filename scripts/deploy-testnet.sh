@@ -89,6 +89,13 @@ command -v stellar >/dev/null 2>&1 || {
   exit 1
 }
 
+command -v jq >/dev/null 2>&1 || {
+  echo "error: jq not found on PATH. It is required to serialize the deployment manifest safely." >&2
+  echo "  Install it with your package manager, e.g. 'apt-get install jq' or 'brew install jq'." >&2
+  exit 1
+}
+=======
+
 echo "==> Checking CONTRACT_VERSION is consistent with Cargo.toml before building"
 "$ROOT_DIR/.github/scripts/check-contract-version.sh"
 
@@ -173,17 +180,53 @@ if [[ "$DEPLOYED_WASM_HASH" != "$WASM_HASH" ]]; then
 fi
 echo "==> OK: deployed bytecode hash matches local WASM SHA-256"
 
-mkdir -p "$(dirname "$OUTPUT_FILE")"
-cat > "$OUTPUT_FILE" <<JSON
-{
-  "WillContract": "$CONTRACT_ID",
-  "network": "$NETWORK",
-  "rpcUrl": "$RPC_URL",
-  "identity": "$DEPLOY_IDENTITY",
-  "deployedAt": "$DEPLOYED_AT",
-  "wasmHash": "$WASM_HASH"
-}
-JSON
+# Serialize the manifest with jq so every value is properly JSON-escaped, then
+# validate it and atomically replace the destination. A failure at any point
+# (serialization, validation, interrupted write) leaves the existing
+# OUTPUT_FILE bytes untouched.
+OUTPUT_DIR="$(dirname "$OUTPUT_FILE")"
+mkdir -p "$OUTPUT_DIR"
+TMP_MANIFEST="$(mktemp "${OUTPUT_DIR}/.deploy-manifest.XXXXXX")"
+trap 'rm -f "$FETCHED_WASM" "$TMP_MANIFEST"' EXIT
+
+if ! jq -n \
+  --arg contractId "$CONTRACT_ID" \
+  --arg network "$NETWORK" \
+  --arg rpcUrl "$RPC_URL" \
+  --arg identity "$DEPLOY_IDENTITY" \
+  --arg deployedAt "$DEPLOYED_AT" \
+  --arg wasmHash "$WASM_HASH" \
+  '{
+    WillContract: $contractId,
+    network: $network,
+    rpcUrl: $rpcUrl,
+    identity: $identity,
+    deployedAt: $deployedAt,
+    wasmHash: $wasmHash
+  }' > "$TMP_MANIFEST"; then
+  echo "error: failed to serialize deployment manifest; $OUTPUT_FILE left unchanged." >&2
+  exit 1
+fi
+
+# Validate required fields are present, string-typed and non-empty before the
+# manifest is allowed to replace the prior record.
+if ! jq -e '
+  (type == "object")
+  and ([.WillContract, .network, .rpcUrl, .identity, .deployedAt, .wasmHash]
+       | all(type == "string" and length > 0))
+' "$TMP_MANIFEST" >/dev/null; then
+  echo "error: generated deployment manifest failed validation; $OUTPUT_FILE left unchanged." >&2
+  exit 1
+fi
+
+# Atomic replace: mv within the same directory is a rename, so readers see
+# either the old complete file or the new complete file, never a partial one.
+if ! mv -f "$TMP_MANIFEST" "$OUTPUT_FILE"; then
+  echo "error: failed to atomically replace $OUTPUT_FILE; prior record left unchanged." >&2
+  exit 1
+fi
+# The temp file no longer exists after a successful mv; disarm the cleanup.
+trap 'rm -f "$FETCHED_WASM"' EXIT
 
 echo "==> Wrote $OUTPUT_FILE"
 echo
