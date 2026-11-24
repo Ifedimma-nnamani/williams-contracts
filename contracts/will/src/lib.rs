@@ -724,6 +724,12 @@ impl WillContract {
     ///   the bounty is deducted proportionally from every token the will
     ///   holds (#109).
     ///
+    ///   A targeted token is stored on the will as `Will::keeper_bounty_token`
+    ///   (`Some(token)`), so callers — and the fuzz harness — can read back
+    ///   which token the bounty will be paid from. A successful
+    ///   `set_keeper_bounty_token` call therefore leaves the requested target
+    ///   active, and a rejected one leaves the previous selection untouched.
+    ///
     /// # Returns
     /// The newly allocated will id.
     ///

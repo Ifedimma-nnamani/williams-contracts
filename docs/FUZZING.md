@@ -105,11 +105,19 @@ cargo test                                  # everything
 cargo test --package will fuzz_test         # just the fuzzing suite
 ```
 
-To explore harder than the default 48 cases per property:
+By default the suite runs **48 cases per property** when `PROPTEST_CASES` is
+unset — a bounded campaign that keeps CI fast. The suite honors the
+`PROPTEST_CASES` environment variable, so setting it actually expands (or
+shrinks) the campaign:
 
 ```sh
 PROPTEST_CASES=5000 cargo test --package will fuzz_test -- --nocapture
 ```
+
+The command above now genuinely runs 5000 cases per property rather than
+silently falling back to the default 48. An invalid value (for example a
+non-numeric string or zero) produces a clear diagnostic from `proptest`
+instead of being ignored.
 
 A failing case is written to `contracts/will/proptest-regressions/` and replayed
 on every subsequent run. **Commit that file** — it is how a regression stays
