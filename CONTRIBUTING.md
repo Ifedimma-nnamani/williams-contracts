@@ -129,6 +129,8 @@ since `migrate_will` is opt-in.
 
 ## Before opening a PR
 
+<a id="before-opening-a-pr"></a>
+
 Run every command used by the [Test CI workflow](./.github/workflows/test.yml) and confirm it succeeds:
 
 - [ ] `cargo fmt --all -- --check`
@@ -139,6 +141,8 @@ Run every command used by the [Test CI workflow](./.github/workflows/test.yml) a
 - [ ] Confirm the Test workflow is green on the PR.
 
 ## Local setup
+
+<a id="local-setup"></a>
 
 See the [README](./README.md#local-setup) for toolchain installation and how to run the test suite.
 
