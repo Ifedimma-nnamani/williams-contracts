@@ -4,13 +4,26 @@
 # types) as a versioned JSON file under spec/.
 #
 # Usage:
-#   scripts/export-spec.sh           write spec/will-v<version>.json
-#   scripts/export-spec.sh --check   verify the committed snapshot is current
+#   scripts/export-spec.sh                        write spec/will-v<version>.json
+#   scripts/export-spec.sh --check                verify the committed snapshot is current
+#   scripts/export-spec.sh --update-unreleased    replace an existing snapshot for an
+#                                                 unreleased version
+#
+# Only zero arguments, exactly one --check, or exactly one --update-unreleased
+# are accepted; any other combination is a usage error (exit 2).
+#
+# Published snapshots are never overwritten by ordinary generation: if
+# spec/will-v<version>.json already exists, the write mode refuses to replace
+# it unless --update-unreleased is passed. That flag is only for regenerating a
+# snapshot whose version has not been released yet. The export is written to a
+# temporary file first and only moved into place on success, so a failed export
+# leaves any existing snapshot bytes untouched.
 #
 # --check exports to a temporary file and compares it against the committed
 # snapshot. It exits non-zero when they differ, or when no snapshot exists for
 # the crate version currently declared — the case where a public signature
 # changed and the version was bumped but the export step was skipped.
+=======
 #
 # Requires: cargo, the wasm32v1-none target, stellar-cli >= 22.0.0 (`cargo install
 # --locked stellar-cli`), and jq.
@@ -21,12 +34,23 @@ set -euo pipefail
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$repo_root"
 
+usage() {
+  echo "Usage: scripts/export-spec.sh [--check | --update-unreleased]" >&2
+}
+
 check_mode=0
-if [[ "${1:-}" == "--check" ]]; then
+update_mode=0
+if [[ "$#" -eq 0 ]]; then
+  :
+elif [[ "$#" -eq 1 && "$1" == "--check" ]]; then
   check_mode=1
-elif [[ -n "${1:-}" ]]; then
-  echo "Unknown argument: $1" >&2
-  echo "Usage: scripts/export-spec.sh [--check]" >&2
+elif [[ "$#" -eq 1 && "$1" == "--update-unreleased" ]]; then
+  update_mode=1
+else
+  if [[ "$#" -gt 0 ]]; then
+    echo "Unknown argument: $1" >&2
+  fi
+  usage
   exit 2
 fi
 
@@ -45,8 +69,22 @@ echo "Building will contract (release, wasm32v1-none)..."
 SOROBAN_SDK_BUILD_SYSTEM_SUPPORTS_SPEC_SHAKING_V2=1 cargo build -p will --release --target wasm32v1-none
 
 if [[ "${check_mode}" -eq 0 ]]; then
+  if [[ -e "${out_path}" && "${update_mode}" -eq 0 ]]; then
+    echo "ERROR: ${out_path} already exists." >&2
+    echo "Published spec snapshots are never overwritten by ordinary generation." >&2
+    echo "If version ${version} is not released yet, regenerate it with:" >&2
+    echo "  scripts/export-spec.sh --update-unreleased" >&2
+    echo "Otherwise bump the version in contracts/will/Cargo.toml and export again." >&2
+    exit 1
+  fi
+
+  tmp_dir="$(mktemp -d)"
+  trap 'rm -rf "${tmp_dir}"' EXIT
+  fresh_path="${tmp_dir}/will-v${version}.json"
+
   echo "Exporting spec to ${out_path}..."
-  export_spec "${out_path}"
+  export_spec "${fresh_path}"
+  mv -f "${fresh_path}" "${out_path}"
   echo "Done. Diff ${out_path} against the previous version to review drift."
   exit 0
 fi
