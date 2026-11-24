@@ -21,6 +21,11 @@ set -euo pipefail
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$repo_root"
 
+# Allow tests to substitute the cargo binary (mirrors STELLAR_BIN in
+# export-spec.sh) so the offline command-stub suite can exercise this script
+# without a real toolchain.
+cargo_bin="${CARGO_BIN:-cargo}"
+
 # Detect whether the profile module is active in lib.rs.
 # The line is considered disabled when it is commented out (leading // or #).
 if ! grep -qE '^[[:space:]]*mod profile;' contracts/will/src/lib.rs; then
@@ -51,10 +56,10 @@ echo "Running the resource-cost profile..."
 # the command substitution: an installed-but-failing Cargo must surface its
 # diagnostics (and original exit status) rather than exiting silently.
 profile_status=0
-profile_output="$(cargo test -p will --lib profile -- --nocapture 2>&1)" || profile_status=$?
+profile_output="$("$cargo_bin" test -p will --lib profile -- --nocapture 2>&1)" || profile_status=$?
 
 if [ "$profile_status" -ne 0 ]; then
-  echo "ERROR: 'cargo test -p will --lib profile -- --nocapture' failed with exit status ${profile_status}." >&2
+  echo "ERROR: '$cargo_bin test -p will --lib profile -- --nocapture' failed with exit status ${profile_status}." >&2
   echo "       Captured output follows:" >&2
   printf '%s\n' "$profile_output" >&2
   exit "$profile_status"

@@ -241,3 +241,105 @@ fn owner_can_redirect_after_the_will_is_archived() {
     client.retry_failed_payout(&will_id, &token_address, &recovery);
     assert_eq!(token_client.balance(&recovery), 500_000);
 }
+
+/// Issue #212: the read-only amount query reports the recorded amount before
+/// any recovery action, and an empty result for tuples that were never
+/// recorded.
+#[test]
+fn failed_payout_amount_query_reports_recorded_amount() {
+    let (env, client, _token_client, _owner, token_address, beneficiary, _contract_id, will_id) =
+        setup_with_failed_payout();
+    let stranger = Address::generate(&env);
+
+    assert_eq!(
+        client.get_failed_payout_amount(&will_id, &token_address, &beneficiary),
+        Some(500_000),
+        "a known tuple must report its current amount"
+    );
+    assert_eq!(
+        client.get_failed_payout_amount(&will_id, &token_address, &stranger),
+        None,
+        "an unknown tuple must return an empty result"
+    );
+}
+
+/// Issue #212: the amount query follows a redirection — the old tuple becomes
+/// empty and the new tuple reports the same amount.
+#[test]
+fn failed_payout_amount_query_follows_redirection() {
+    let (env, client, _token_client, owner, token_address, beneficiary, _contract_id, will_id) =
+        setup_with_failed_payout();
+    let recovery = Address::generate(&env);
+
+    client.redirect_failed_payout(&will_id, &token_address, &beneficiary, &recovery, &owner);
+
+    assert_eq!(
+        client.get_failed_payout_amount(&will_id, &token_address, &beneficiary),
+        None,
+        "the old tuple must report an empty result after redirection"
+    );
+    assert_eq!(
+        client.get_failed_payout_amount(&will_id, &token_address, &recovery),
+        Some(500_000),
+        "the new tuple must report the redirected amount"
+    );
+}
+
+/// Issue #212: the amount query returns an empty result once a payout has been
+/// successfully retried, without mutating anything.
+#[test]
+fn failed_payout_amount_query_is_empty_after_successful_retry() {
+    let (env, client, token_client, _owner, token_address, beneficiary, _contract_id, will_id) =
+        setup_with_failed_payout();
+
+    assert_eq!(
+        client.get_failed_payout_amount(&will_id, &token_address, &beneficiary),
+        Some(500_000)
+    );
+
+    client.retry_failed_payout(&will_id, &token_address, &beneficiary);
+    assert_eq!(token_client.balance(&beneficiary), 500_000);
+
+    assert_eq!(
+        client.get_failed_payout_amount(&will_id, &token_address, &beneficiary),
+        None,
+        "a resolved tuple must report an empty result"
+    );
+}
+
+/// Issue #212: the amount query keeps working after the parent will is
+/// archived, both before and after a redirection.
+#[test]
+fn failed_payout_amount_query_works_after_parent_archival() {
+    let (env, client, token_client, owner, token_address, beneficiary, _contract_id, will_id) =
+        setup_with_failed_payout();
+    let recovery = Address::generate(&env);
+
+    client.close_will(&will_id, &owner);
+    client.archive_will(&will_id);
+
+    assert_eq!(
+        client.get_failed_payout_amount(&will_id, &token_address, &beneficiary),
+        Some(500_000),
+        "the query must survive parent archival"
+    );
+
+    client.redirect_failed_payout(&will_id, &token_address, &beneficiary, &recovery, &owner);
+
+    assert_eq!(
+        client.get_failed_payout_amount(&will_id, &token_address, &beneficiary),
+        None
+    );
+    assert_eq!(
+        client.get_failed_payout_amount(&will_id, &token_address, &recovery),
+        Some(500_000),
+        "the query must follow redirection after archival"
+    );
+
+    client.retry_failed_payout(&will_id, &token_address, &recovery);
+    assert_eq!(token_client.balance(&recovery), 500_000);
+    assert_eq!(
+        client.get_failed_payout_amount(&will_id, &token_address, &recovery),
+        None
+    );
+}

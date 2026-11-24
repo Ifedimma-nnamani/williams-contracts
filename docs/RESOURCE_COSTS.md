@@ -401,3 +401,25 @@ truncation remainder) for every token held by the will:
    hashing. Callers who wish to designate which beneficiary receives the
    sub-stroop rounding surplus can place that beneficiary last in the
    `Allocation::Percentage` list.
+
+## Hashed beneficiary cap
+
+A will can register up to ten hashed beneficiaries, separately from its
+visible beneficiaries. Adding a slot or cloning a source above the cap
+fails with `TooManyBeneficiaries`. Existing wills above the cap can still
+release and claim their registered shares.
+
+The cap profile uses ten tokens, three visible fixed-amount beneficiaries,
+and ten hashed slots claimed in reverse order. One visible transfer and one
+hashed transfer fail and are retried. The profile measured the following
+invocation costs in the SDK test host.
+
+| Invocation | Native instructions | WASM instructions | Ledger bytes written |
+| --- | ---: | ---: | ---: |
+| Release | 5,804,224 | 12,292,918 | 10,628 |
+| Highest claim cost in each column | 5,215,177 | 9,366,260 | 9,972 |
+
+Run the native profile with `cargo test -p will --test hashed_slot_limit`.
+To profile the compiled contract, set `WILL_WASM` to the absolute path of
+the release WASM and add `-- --include-ignored --nocapture`. The WASM
+profile loads the artifact in the test host and measures invocation resources.

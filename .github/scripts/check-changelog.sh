@@ -1,11 +1,12 @@
 #!/bin/bash
 set -euo pipefail
 
-BASE_REF="${BASE_REF:-origin/${GITHUB_BASE_REF:-main}}"
+BASE_REF="${CHANGELOG_BASE:-${BASE_REF:-origin/${GITHUB_BASE_REF:-main}}}"
 HEAD_REF="${HEAD_REF:-HEAD}"
+LIB_RS=contracts/will/src/lib.rs
 
-if ! git rev-parse --verify --quiet "$BASE_REF" >/dev/null; then
-    echo "::error::Cannot resolve base ref $BASE_REF; checkout must fetch full history (fetch-depth: 0)"
+if ! git rev-parse --verify --quiet "$BASE_REF^{commit}" >/dev/null; then
+    echo "::error::Cannot resolve base commit $BASE_REF; checkout must fetch full history (fetch-depth: 0)"
     exit 1
 fi
 
@@ -14,7 +15,7 @@ if ! git rev-parse --verify --quiet "$HEAD_REF" >/dev/null; then
     exit 1
 fi
 
-LIB_PATH="contracts/will/src/lib.rs"
+LIB_PATH="$LIB_RS"
 
 # Extract the CONTRACT_VERSION assignment value from a file at a given ref.
 # Only the assignment line is considered; prose/comment mentions are ignored.

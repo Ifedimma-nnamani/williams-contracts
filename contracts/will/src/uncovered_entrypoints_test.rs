@@ -197,3 +197,27 @@ fn reject_guardian_role_marks_the_guardian_as_rejected_and_blocks_voting() {
         Err(Ok(WillError::GuardianNotConsented.into())),
     );
 }
+
+#[test]
+fn get_failed_payout_amount_returns_none_for_unknown_tuple() {
+    let (env, client, _owner, token_address) = setup();
+    let beneficiary = Address::generate(&env);
+
+    // No failed payout has ever been recorded for this tuple, so the query
+    // must report an empty result without mutating state.
+    assert_eq!(
+        client.get_failed_payout_amount(&1, &token_address, &beneficiary),
+        None
+    );
+}
+
+#[test]
+fn get_guardian_cancel_vote_returns_none_without_a_vote() {
+    let (env, client, _owner, will_id, guardian) = setup_with_guardian();
+
+    // The guardian has not voted to cancel, so the query reports no record.
+    assert_eq!(
+        client.get_guardian_cancel_vote(&will_id, &guardian),
+        None
+    );
+}

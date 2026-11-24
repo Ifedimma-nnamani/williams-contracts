@@ -25,11 +25,21 @@
 //!   therefore missing, which understates `instructions` in particular.
 //!   Ledger-entry counts and byte sizes — the quantities this profile exists
 //!   to police — are unaffected.
+//! - The same native registration means the `memory` column understates the
+//!   real on-chain figure: it reports the host memory budget metered for the
+//!   invocation, but excludes the Wasm module's instantiation and execution
+//!   memory, which only exist when the contract runs as Wasm. The column is
+//!   still a valid *lower bound* and is asserted against [`MAX_MEMORY_BYTES`],
+//!   so a change that blows the host memory budget fails here even though the
+//!   absolute number is optimistic.
 //! - Resource estimation is approximate by design; the SDK points at RPC
 //!   simulation for exact submission resources.
 //!
 //! `read_entries` counts entries read but *not* modified, so an entry point's
-//! total ledger footprint is `read_entries + write_entries`.
+//! total ledger footprint is `read_entries + write_entries`. `memory` is the
+//! host memory budget consumed by the invocation and is reported separately
+//! from the ledger byte columns.
+=======
 //!
 //! # Platform parameters
 //!
@@ -78,6 +88,11 @@ const PROFILE_BENEFICIARIES: u32 = 5;
 const MAX_INSTRUCTIONS: i64 = 100_000_000;
 
 /// Maximum memory bytes per transaction (Protocol 21/22).
+///
+/// Measured as the host memory budget consumed by the invocation (see
+/// [`Row::memory_bytes`]). Note that a natively-registered test contract
+/// understates this relative to Wasm execution, so the assertion is a lower
+/// bound on the real on-chain figure.
 const MAX_MEMORY_BYTES: u64 = 40 * 1024 * 1024;
 
 /// Maximum ledger entries read per transaction (Protocol 21/22).
@@ -96,6 +111,13 @@ const MAX_WRITE_BYTES: u32 = 132 * 1024;
 struct Row {
     name: &'static str,
     instructions: i64,
+    /// Host memory budget consumed by the invocation, in bytes.
+    ///
+    /// Reported separately from the ledger read/write byte columns: this is
+    /// the SDK's metered memory budget, not ledger traffic. Under native
+    /// registration it excludes Wasm instantiation/execution memory, so it is
+    /// a lower bound on the on-chain figure.
+    memory_bytes: u64,
     read_entries: u32,
     write_entries: u32,
     read_bytes: u32,
@@ -129,6 +151,9 @@ impl Report {
         self.rows.push(Row {
             name,
             instructions: resources.instructions,
+            // The host memory budget metered for this invocation. Kept
+            // distinct from the ledger byte counters below.
+            memory_bytes: resources.memory_bytes,
             // soroban-sdk v28 split the old single `read_entries` counter
             // into disk and memory reads. Everything a natively-registered
             // test contract touches is in-memory state, so the profile's
@@ -171,6 +196,13 @@ impl Report {
                 MAX_INSTRUCTIONS,
             );
             assert!(
+                row.memory_bytes <= MAX_MEMORY_BYTES,
+                "{}: {} memory bytes exceeds Protocol 21/22 limit of {}",
+                row.name,
+                row.memory_bytes,
+                MAX_MEMORY_BYTES,
+            );
+            assert!(
                 row.read_entries <= MAX_READ_ENTRIES,
                 "{}: {} read entries exceeds Protocol 21/22 limit of {}",
                 row.name,
@@ -207,14 +239,15 @@ impl Report {
             "\nWilliams resource profile ({PROFILE_BENEFICIARIES} beneficiaries, 2 guardians)\n"
         );
         println!(
-            "| entry point | instructions | read entries | write entries | read bytes | write bytes | rent ledger-bytes | fee (stroops) |"
+            "| entry point | instructions | memory bytes | read entries | write entries | read bytes | write bytes | rent ledger-bytes | fee (stroops) |"
         );
-        println!("| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |");
+        println!("| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |");
         for row in &self.rows {
             println!(
-                "| {} | {} | {} | {} | {} | {} | {} | {} |",
+                "| {} | {} | {} | {} | {} | {} | {} | {} | {} |",
                 row.name,
                 row.instructions,
+                row.memory_bytes,
                 row.read_entries,
                 row.write_entries,
                 row.read_bytes,
@@ -382,4 +415,56 @@ fn profile() {
 
     report.print();
     report.assert_within_limits();
+}
+
+/// Proves the memory guard fires independently of the ledger limits.
+///
+/// This scenario deliberately allocates far more host memory than
+/// [`MAX_MEMORY_BYTES`] while touching almost no ledger state, so it can only
+/// fail on the memory assertion. It is a controlled negative test: it does not
+/// go through [`Report::assert_within_limits`] (which would panic), but checks
+/// the same predicate directly.
+#[test]
+fn profile_memory_guard_fails_independently() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    // Allocate a large host-side buffer inside the metered invocation. The
+    // allocation is intentionally larger than MAX_MEMORY_BYTES so the guard
+    // must trip on memory alone.
+    let mut report = Report::new();
+    {
+        let mut sink: StdVec<u8> = StdVec::new();
+        sink.resize((MAX_MEMORY_BYTES as usize) * 2, 0u8);
+        // Keep the allocation live across the measurement.
+        std::hint::black_box(&sink);
+        report.record(&env, "allocation_heavy");
+        std::hint::black_box(&sink);
+    }
+
+    let row = report.row("allocation_heavy");
+    // Ledger limits are trivially satisfied: no ledger entries were touched.
+    assert!(
+        row.read_entries <= MAX_READ_ENTRIES,
+        "allocation_heavy unexpectedly exceeded read entries"
+    );
+    assert!(
+        row.write_entries <= MAX_WRITE_ENTRIES,
+        "allocation_heavy unexpectedly exceeded write entries"
+    );
+    assert!(
+        row.read_bytes <= MAX_READ_BYTES,
+        "allocation_heavy unexpectedly exceeded read bytes"
+    );
+    assert!(
+        row.write_bytes <= MAX_WRITE_BYTES,
+        "allocation_heavy unexpectedly exceeded write bytes"
+    );
+    // The memory guard must fail on its own.
+    assert!(
+        row.memory_bytes > MAX_MEMORY_BYTES,
+        "allocation_heavy: {} memory bytes did not exceed limit of {}",
+        row.memory_bytes,
+        MAX_MEMORY_BYTES,
+    );
 }

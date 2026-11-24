@@ -6,18 +6,6 @@ set -euo pipefail
 # contracts/will/Cargo.toml, and (when HEAD is tagged) the git version tag all
 # agree on the same semantic version (#501).
 #
-# test.yml has invoked this script on every pull request ("Verify
-# CONTRACT_VERSION matches git version tag") since check-changelog.sh's
-# CONTRACT_VERSION guard was added for #439, and CONTRIBUTING.md's "Contract
-# versioning" section documents the same check under "Before opening a PR" --
-# but the script itself was never committed, so every PR touching
-# contracts/will/src/lib.rs has been failing this CI step (or the step never
-# actually ran, depending on how `bash <missing file>` was tolerated). Worse,
-# the check it was meant to perform was already failing on main:
-# contracts/will/Cargo.toml carried `version = "0.1.0"` while
-# CONTRACT_VERSION decoded to "1.2.0" -- exactly the drift this script exists
-# to catch, undetected because the script didn't exist (#501).
-#
 # This only checks *source-level* consistency, i.e. what will be true of the
 # next build -- it cannot tell you whether a specific already-deployed
 # contract instance is running a binary that matches this source tree. That

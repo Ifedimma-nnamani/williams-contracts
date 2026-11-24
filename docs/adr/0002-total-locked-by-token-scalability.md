@@ -4,60 +4,97 @@
 
 Accepted and Implemented (Issue #22).
 
-Per-token locked totals are refactored into discrete storage entries (`DataKey::TotalLocked(Address)`), keeping per-transaction read/write footprint and gas consumption constant across distinct protocol tokens.
+Per-token locked totals are stored as discrete **persistent** storage entries
+(`DataKey::TotalLocked(Address)`), keeping the per-transaction read/write
+footprint and gas consumption of a locked-total update constant in the number
+of distinct protocol tokens. The original `ProtocolStats.total_locked_by_token`
+vector is retained only as a legacy, read-only fallback.
+
+## Adopted decision
+
+The discrete persistent-key design — a variant of **Option C** below, using
+`DataKey::TotalLocked(Address)` in persistent storage rather than a separate
+instance key — was adopted in #22 and is the current implementation. Options A
+and B were considered and rejected; they are preserved here for historical
+context only. Any statement in this document that describes a `Vec`-scan or a
+`Map<Address, i128>` inside `ProtocolStats` as "current" or "recommended" is
+superseded by this section.
+
+### Storage namespaces
+
+| Key | Namespace | Purpose |
+| --- | --- | --- |
+| `DataKey::TotalLocked(Address)` | **Persistent** | Per-token aggregate of locked amounts. Each entry has its own TTL and is bumped on write. |
+| `DataKey::ProtocolTokens` | **Instance** | `Vec<Address>` directory of tokens with a non-zero locked total. |
+| `DataKey::ActiveWillCount` | **Instance** | Count of active wills, maintained alongside the token directory. |
+| `DataKey::ProtocolStats` | **Instance** | Legacy `ProtocolStats` entry (including the old `total_locked_by_token` vector). Read-only fallback; never written by the current code path. |
+
+Persistent entries are independent ledger entries: reading or writing one
+token's total does not deserialise any other token's total. Instance entries
+are read as a single ledger entry, so the token directory and the active-will
+count share the instance entry's read/write cost.
 
 ## Context
 
-`ProtocolStats` carries a `total_locked_by_token: Vec<TokenLockedBalance>`
-that aggregates, for every distinct token ever locked by any will, the current
-sum of amounts held across all active wills.  It is stored in **instance
-storage** and updated on every `create_will`, `top_up`, and `cancel_will`.
+`ProtocolStats` historically carried a `total_locked_by_token:
+Vec<TokenLockedBalance>` that aggregated, for every distinct token ever locked
+by any will, the current sum of amounts held across all active wills. It was
+stored in **instance storage** and updated on every `create_will`, `top_up`,
+and `cancel_will`.
 
 The helper that updates it is `storage::adjust_locked_value`:
 
 ```rust
 // storage.rs — current implementation
 pub fn adjust_locked_value(env: &Env, token: &Address, delta: i128) {
-    let mut stats = get_protocol_stats(env);
+    let key = DataKey::TotalLocked(token.clone());
+    let current = get_total_locked(env, token);
+    let updated = current + delta;
+    env.storage().persistent().set(&key, &updated);
+    bump_persistent(env, &key);
+
+    // Maintain the instance-storage token directory.
+    let mut tokens = get_protocol_tokens(env);
     let mut found = false;
-    let mut updated = Vec::new(env);
-    for entry in stats.total_locked_by_token.iter() {   // O(N) scan
-        if entry.token == *token {
-            updated.push_back(TokenLockedBalance {
-                token: entry.token.clone(),
-                total_locked: entry.total_locked + delta,
-            });
+    let mut rebuilt = Vec::new(env);
+    for entry in tokens.iter() {
+        if entry == *token {
             found = true;
+            if updated != 0 {
+                rebuilt.push_back(entry);
+            }
         } else {
-            updated.push_back(entry.clone());            // full Vec rebuild
+            rebuilt.push_back(entry);
         }
     }
-    if !found {
-        updated.push_back(TokenLockedBalance {
-            token: token.clone(),
-            total_locked: delta,
-        });
+    if !found && updated != 0 {
+        rebuilt.push_back(token.clone());
     }
-    stats.total_locked_by_token = updated;
-    save_protocol_stats(env, &stats);
+    if rebuilt.len() != tokens.len() {
+        env.storage().instance().set(&DataKey::ProtocolTokens, &rebuilt);
+    }
 }
 ```
 
-Two costs scale with `N`, the number of **distinct token addresses ever used
-across all wills on the protocol**:
+`adjust_locked_for_balances` iterates `will.balances` and calls
+`adjust_locked_value` once per token, so multi-token wills are decremented on
+cancellation, release and distribution.
 
-1. **CPU instructions** — every element in the vector is compared and cloned.
-   The Soroban instruction meter charges for both.
-2. **Read and write bytes** — `get_protocol_stats` deserialises the full
-   `ProtocolStats` entry (including every `TokenLockedBalance` tuple) from
-   instance storage, and `save_protocol_stats` serialises the rebuilt vector
-   back.  The byte cost therefore grows as `O(N × sizeof(TokenLockedBalance))`.
+Two costs scale with `N`, the number of **distinct token addresses with a
+non-zero locked total**:
 
-Neither `N` nor the byte size of the entry has an upper bound today.  Any
-address on the Stellar network can create a will that references a novel token,
-permanently adding one entry to the vector and making every subsequent
-`create_will`, `top_up`, and `cancel_will` slightly more expensive — for
-everyone, regardless of which tokens their own wills use.
+1. **CPU instructions** — the persistent read/write is `O(1)` in `N`, but the
+   token-directory rebuild in instance storage is `O(N)` and runs on the first
+   insert of a token and on removal of a token whose total reaches zero.
+2. **Read and write bytes** — the persistent entry is a single `i128` per
+   token, so its cost is independent of `N`. The instance `ProtocolTokens`
+   vector is rewritten whenever the directory changes, so its byte cost grows
+   as `O(N × sizeof(Address))` on those calls.
+
+`N` is still unbounded: any address on the Stellar network can create a will
+that references a novel token, adding one entry to the directory. However, the
+cost of that growth is now confined to the calls that change the directory
+(first insert, removal to zero) rather than to every locked-total update.
 
 ### Additional issue discovered during analysis
 
@@ -107,7 +144,7 @@ liveness issue the owner cannot work around.
 
 **Cons (A2):** silent data loss; aggregate totals become unreliable.
 
-### Option B — Switch `total_locked_by_token` to a `Map<Address, i128>`
+### Option B — Switch `total_locked_by_token` to a `Map<Address, i128>` (rejected)
 
 Replace `Vec<TokenLockedBalance>` with a Soroban `Map<Address, i128>` keyed by
 token address.  The update becomes a single `get`/`set` pair instead of a
@@ -137,42 +174,78 @@ be reconstructed on read if backward-compatible serialisation is needed.
 **Cons:** requires a storage-layout migration for the `ProtocolStats` instance
 entry (the `contracttype` encoding of `Map` differs from `Vec`); the byte
 footprint of instance storage still grows with `N`, just unavoidably so.
+**Rejected:** the whole `ProtocolStats` entry would still be deserialised on
+every update, so byte traffic would remain `O(N)` per call.
 
-### Option C — Move per-token totals out of instance storage
+### Option C — Move per-token totals out of instance storage (adopted, persistent-key variant)
 
-Store each token's aggregate as a separate instance-storage key
-`DataKey::LockedByToken(Address)`.  `adjust_locked_value` then reads and writes
+Store each token's aggregate as a separate storage key
+`DataKey::TotalLocked(Address)`.  `adjust_locked_value` then reads and writes
 exactly one small entry regardless of how many distinct tokens the protocol
 has ever seen.  `get_protocol_stats` becomes a scan across all
-`LockedByToken` keys, which is not directly supported by the Soroban storage
+`TotalLocked` keys, which is not directly supported by the Soroban storage
 API (no enumerate/scan).
 
 **Pros:** per-call read/write bytes are constant in `N`; no single bloated
-entry.
+entry; the per-token entry is a single `i128` with its own TTL.
 
 **Cons:** Soroban's storage API does not expose key enumeration, so
-`get_protocol_stats` would have to reconstruct the list from an explicit index
-(a `Vec<Address>` of all tokens seen), reintroducing a separate growing
-structure.  The complexity cost shifts rather than disappears.  Rejected for
-now; worth revisiting if the number of distinct tokens actually approaches
-practical instance-storage size limits.
+`get_protocol_stats` must reconstruct the list from an explicit index. The
+implementation keeps that index as `DataKey::ProtocolTokens` (a `Vec<Address>`
+in instance storage), so the directory cost scales with the number of distinct
+active tokens and is rewritten on first insert and on removal to zero.
 
-## Recommended approach
+**Adopted in its persistent-key form:** `DataKey::TotalLocked(Address)` lives
+in persistent storage (not instance storage), with `DataKey::ProtocolTokens`
+and `DataKey::ActiveWillCount` in instance storage. See "Adopted decision"
+above.
 
-**Option B**, with a documented soft cap as an operational guardrail.
+## Implemented design
 
-1. Change `ProtocolStats.total_locked_by_token` from `Vec<TokenLockedBalance>`
-   to `Map<Address, i128>`.  The existing `TokenLockedBalance` struct is kept
-   for the `get_protocol_stats` return type (reconstructed on read from the
-   map) so the public interface remains backward-compatible.
-2. Rewrite `adjust_locked_value` to use a single map `get`/`set`.
-3. Fix `cancel_will` and `release_inheritance`/`distribute` to call
-   `adjust_locked_value` for **every token in `will.balances`**, not just
-   `will.token`.  (`cancel_will`'s half of this is already done — see #353.)
-4. Document a soft operational limit (e.g. "the protocol works correctly at any
-   `N`; beyond ~200 distinct tokens the instance entry exceeds 8 KB and reads
-   become measurably more expensive — operators should monitor `N` and consider
-   a stats-reset migration if it grows beyond that range").
+**Option C (persistent-key variant)**, as shipped in #22.
+
+1. `DataKey::TotalLocked(Address)` holds the per-token aggregate in persistent
+   storage. `adjust_locked_value` reads it via `get_total_locked`, adds the
+   delta, writes it back and bumps the persistent TTL.
+2. `DataKey::ProtocolTokens` (instance storage) is the token directory. It is
+   rewritten only when the set of tokens with a non-zero total changes: on the
+   first insert of a token and on removal of a token whose total reaches zero.
+3. `DataKey::ActiveWillCount` (instance storage) tracks the number of active
+   wills.
+4. `DataKey::ProtocolStats` (instance storage) is retained as a legacy,
+   read-only fallback. `get_protocol_stats` reconstructs the public
+   `ProtocolStats` view from the persistent totals and the token directory,
+   falling back to the legacy vector only when the new keys are absent.
+5. `cancel_will`, `release_inheritance` and `distribute` call
+   `adjust_locked_for_balances`, which invokes `adjust_locked_value` for
+   **every token in `will.balances`**, not just `will.token`.
+
+### Legacy fallback reads
+
+`get_total_locked` resolves a token's total in this order:
+
+1. `DataKey::TotalLocked(Address)` in persistent storage;
+2. the same key in instance storage (pre-migration layout);
+3. the legacy `ProtocolStats.total_locked_by_token` vector.
+
+`get_protocol_tokens` and `get_active_will_count` similarly fall back to the
+legacy `ProtocolStats` entry when their instance keys are absent. These
+fallbacks exist only to read state written before #22; the current code never
+writes the legacy vector.
+
+### Migration authority
+
+* The legacy `ProtocolStats` entry is a **read-only fallback**. It must not be
+  reintroduced as a write target; new code must write only the discrete keys.
+* Schema changes to `DataKey`, `ProtocolStats` or the token directory require
+  the documented migration path: a contract upgrade plus an admin-only
+  migration entry point that rewrites the affected keys and leaves the legacy
+  entry untouched.
+* Migrations are performed by the contract admin through the upgrade path
+  only; no other caller may mutate the storage layout.
+* Operators should monitor the size of `DataKey::ProtocolTokens`; the protocol
+  works correctly at any `N`, but the directory rewrite cost grows with the
+  number of distinct active tokens.
 
 ### Why not Option A
 
@@ -185,35 +258,38 @@ call) without creating a hard ceiling on `N` itself.
 
 ## Consequences
 
-### If Option B is implemented
+### As implemented (Option C, persistent-key variant)
 
-* `adjust_locked_value` drops from `O(N)` to `O(log N)` in CPU instructions.
-* The `ProtocolStats` instance entry still grows with `N`, but that growth is
-  now the unavoidable minimum for storing the data; there is no recoverable
-  overhead on top of it.
-* A one-time storage migration is needed for any deployed instance.  The
-  migration path is: read the current `Vec<TokenLockedBalance>`, construct
-  a `Map<Address, i128>`, write the new `ProtocolStats`.  This can be done via
-  a contract upgrade and a dedicated `migrate_protocol_stats` admin call.
-* The `get_protocol_stats` return type stays `ProtocolStats` with
-  `total_locked_by_token: Vec<TokenLockedBalance>` (reconstructed from the map
-  at query time) so that callers see no breaking change.
+* `adjust_locked_value` performs an `O(1)` persistent read/write of a single
+  `i128` per token, independent of `N`.
+* The `ProtocolTokens` directory in instance storage is rewritten only when
+  the set of tokens with a non-zero total changes, so its `O(N)` cost is paid
+  on first insert and on removal to zero rather than on every update.
+* `ActiveWillCount` and the token directory share the instance entry's
+  read/write cost.
+* The legacy `ProtocolStats` entry is read only as a fallback; it is never
+  written by the current code path.
+* `get_protocol_stats` reconstructs `total_locked_by_token:
+  Vec<TokenLockedBalance>` from the persistent totals and the token directory,
+  so callers see no breaking change.
 
-### If the issue is left open
+### If the discrete-key design had not been adopted
 
-Every `create_will`, `top_up`, and `cancel_will` call becomes permanently and
-unavoidably more expensive as the protocol matures, with no action the caller
-can take to avoid it.  At ~100 distinct tokens the extra deserialization is a
-minor annoyance; at ~1 000 it is a meaningful fraction of the total invocation
-fee.
+Every `create_will`, `top_up`, and `cancel_will` call would become permanently
+and unavoidably more expensive as the protocol matures, with no action the
+caller could take to avoid it. At ~100 distinct tokens the extra
+deserialization would be a minor annoyance; at ~1 000 it would be a meaningful
+fraction of the total invocation fee.
 
 ## Related
 
 * `docs/RESOURCE_COSTS.md` — profiles `create_will` cost at baseline; a
   supplementary scenario measuring cost as `N` grows is tracked there.
-* `contracts/will/src/storage.rs` — `adjust_locked_value`, `get_protocol_stats`,
-  `save_protocol_stats`.
+* `contracts/will/src/storage.rs` — `DataKey`, `get_total_locked`,
+  `adjust_locked_value`, `adjust_locked_for_balances`, `get_protocol_tokens`,
+  `get_active_will_count`, `get_protocol_stats`, `save_protocol_stats`.
 * `contracts/will/src/types.rs` — `ProtocolStats`, `TokenLockedBalance`.
 * `contracts/will/src/lib.rs` — `create_will` (calls `adjust_locked_value` per
-  token), `cancel_will` (calls it only for `will.token`, missing `will.balances`
-  entries), `top_up` (calls it once for the topped-up token).
+  token), `cancel_will`, `release_inheritance` and `distribute` (call
+  `adjust_locked_for_balances` for every token in `will.balances`), `top_up`
+  (calls it once for the topped-up token).

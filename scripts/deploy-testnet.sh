@@ -99,8 +99,8 @@ command -v jq >/dev/null 2>&1 || {
 echo "==> Checking CONTRACT_VERSION is consistent with Cargo.toml before building"
 "$ROOT_DIR/.github/scripts/check-contract-version.sh"
 
-echo "==> Building contract for wasm32v1-none (release)"
-cargo build --package will --release --target wasm32v1-none
+echo "==> Building contract for wasm32v1-none (release, locked, canonical flags)"
+"$ROOT_DIR/scripts/build-wasm.sh" --package will
 
 if [[ ! -f "$WASM_PATH" ]]; then
   echo "error: expected wasm artifact at $WASM_PATH, but it was not produced" >&2
