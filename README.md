@@ -4,8 +4,8 @@
 
 **Trustless on-chain inheritance on Stellar Soroban**
 
-[![Rust](https://img.shields.io/badge/Rust-1.84%2B-orange?logo=rust)](https://www.rust-lang.org/)
-[![Soroban SDK](https://img.shields.io/badge/Soroban%20SDK-22.0.0-7D00FF)](https://developers.stellar.org/docs/build/smart-contracts)
+[![Rust](https://img.shields.io/badge/Rust-1.84.0-orange?logo=rust)](https://www.rust-lang.org/)
+[![Soroban SDK](https://img.shields.io/badge/Soroban%20SDK-28.0.0-7D00FF)](https://developers.stellar.org/docs/build/smart-contracts)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](./LICENSE)
 [![Security Policy](https://img.shields.io/badge/Security-Policy-blue.svg)](./SECURITY.md)
 [![Stellar Testnet](https://img.shields.io/badge/Stellar-Testnet-08b5e5?logo=stellar)](https://developers.stellar.org/docs/networks)
@@ -37,9 +37,31 @@ Williams requires standard **SEP-41 compliant tokens** without transfer fees (`b
 
 ## Tech Stack
 
-- **Rust** 1.84+
-- **soroban-sdk** 22.0.0
-- **stellar-cli** for building and deploying to Soroban networks
+- **Rust** 1.84.0 (pinned via [`rust-toolchain.toml`](./rust-toolchain.toml))
+- **soroban-sdk** 28.0.0 (see [`Cargo.toml`](./Cargo.toml))
+- **stellar-cli** 22.0.0 for building and deploying to Soroban networks
+- **Stellar Quickstart** image `stellar/quickstart:v425.0.0` for the local sandbox
+
+## Tested toolchain matrix
+
+Identical source and `Cargo.lock` revisions must produce identical build and
+local-host behaviour. The versions below are the ones this repository is
+validated against; CI and the local scripts consume these exact versions
+rather than `stable`/`latest`.
+
+| Component | Version | Where it is pinned |
+|---|---|---|
+| Rust toolchain | `1.84.0` | [`rust-toolchain.toml`](./rust-toolchain.toml) |
+| `wasm32v1-none` target | bundled with the toolchain | [`rust-toolchain.toml`](./rust-toolchain.toml) |
+| `soroban-sdk` | `28.0.0` | [`Cargo.toml`](./Cargo.toml) |
+| `stellar-cli` | `22.0.0` | `.github/workflows/scripts-check.yml`, `.github/workflows/test.yml` |
+| Quickstart sandbox image | `stellar/quickstart:v425.0.0` | `SANDBOX_IMAGE` default in [`scripts/run-deploy-sandbox.sh`](./scripts/run-deploy-sandbox.sh) |
+
+> [!IMPORTANT]
+> These versions are only "tested" once the full documented checks have been
+> run against them and the results recorded (see
+> [Updating the toolchain matrix](#updating-the-toolchain-matrix)). Do not
+> change a row in this table without re-running that validation.
 
 ## Local Setup
 
@@ -47,11 +69,11 @@ Williams requires standard **SEP-41 compliant tokens** without transfer fees (`b
 # Install Rust (if you don't already have it)
 curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
 
-# Add the Soroban wasm target
-rustup target add wasm32v1-none
+# rust-toolchain.toml pins the compiler and the wasm32v1-none target;
+# rustup installs both automatically on first use in the repo.
 
-# Install the Stellar CLI (>= 22.0.0)
-cargo install --locked stellar-cli
+# Install the pinned Stellar CLI (22.0.0)
+cargo install --locked stellar-cli --version 22.0.0
 
 # Clone and test
 git clone https://github.com/Williams/williams-contracts.git
@@ -59,6 +81,34 @@ cd williams-contracts
 cargo test
 cargo clippy --all-targets -- -D warnings
 ```
+
+Verify your local versions match the matrix before reporting build issues:
+
+```bash
+rustc --version          # rustc 1.84.0 (...)
+cargo --version          # cargo 1.84.0 (...)
+stellar --version        # stellar 22.0.0 (...)
+docker image inspect stellar/quickstart:v425.0.0 --format '{{.Id}}'
+```
+
+### Updating the toolchain matrix
+
+A matrix update is a deliberate, reviewed change — never a side effect of a
+dependency bump. To change any pinned version:
+
+1. Update the pin itself (`rust-toolchain.toml`, `Cargo.toml`, the workflow
+   `stellar-cli` version, or the `SANDBOX_IMAGE` default).
+2. Update the table above and the badges at the top of this README.
+3. Re-run the **full** validation on the new matrix and capture the output:
+   - native: `cargo test --workspace` and
+     `cargo clippy --all-targets -- -D warnings`
+   - WASM: `cargo build --workspace --release --target wasm32v1-none`
+     (and the size check in [docs/WASM_SIZE.md](./docs/WASM_SIZE.md))
+   - local host: `./scripts/run-deploy-sandbox.sh` against the pinned
+     quickstart image, exercising deploy and a sample invocation
+4. Record the exact versions (`rustc --version`, `stellar --version`, the
+   quickstart image digest) alongside the results in the pull request.
+5. Only then merge. Source review alone cannot select a proven version.
 
 ### Task runner (recommended)
 
@@ -155,28 +205,71 @@ If you need more than 10 heirs, you can:
 
 ## Contract Functions
 
-| Function | Description | Parameters | Returns |
-|---|---|---|---|
-| `create_will` | Locks a token balance and creates a new will | `owner`, `token`, `amount`, `beneficiaries`, `checkin_period_days`, `grace_period_days`, `guardians` | `u64` (will id) |
-| `check_in` | Resets the check-in countdown | `will_id`, `owner` | — |
-| `trigger_will` | Starts the grace period after a missed check-in | `will_id` | — |
-| `emergency_checkin` | Cancels an in-progress trigger during the grace period | `will_id`, `owner` | — |
-| `release_inheritance` | Distributes the balance to beneficiaries after the grace period expires | `will_id` | — |
-| `cancel_will` | Withdraws the full balance and closes the will | `will_id`, `owner` | — |
-| `update_beneficiaries` | Replaces the beneficiary list before the will is triggered | `will_id`, `owner`, `beneficiaries` | — |
-| `top_up` | Adds more of the token to an existing will | `will_id`, `owner`, `amount` | — |
-| `get_will` | Reads the full state of a will | `will_id` | `Will` |
-| `get_will_status` | Reads only a will's lifecycle status, without loading the rest of the struct | `will_id` | `WillStatus` |
-| `get_time_until_deadline` | Seconds until the will's next relevant deadline (confirmation, check-in, or grace period); negative if past due, `None` if not applicable to the current status | `will_id` | `Option<i64>` |
-| `get_wills_by_owner` | Lists a page of wills owned by an address | `owner`, `cursor`, `limit` | `Vec<Will>` |
-| `get_owner_stats` | Aggregate stats for an owner: total wills, non-terminal wills, and locked value per token across all their wills | `owner` | `OwnerStats` |
-| `get_wills_by_beneficiary` | Lists every will an address is named in | `beneficiary` | `Vec<Will>` |
-| `get_wills_by_owner_and_status` | Lists a page of an owner's wills in a given status (filter applied before paging) | `owner`, `status`, `cursor`, `limit` | `Vec<Will>` |
-| `get_wills_by_owner_and_status_page` | Same as above, plus `total_count` of all matches and an explicit `next_cursor` (`None` on the last page) | `owner`, `status`, `cursor`, `limit` | `WillPage` |
-| `get_will_history` | Reads a will's on-chain audit trail (capped at the newest `MAX_HISTORY_ENTRIES` transitions) | `will_id` | `Vec<WillStatusTransition>` |
-| `get_will_history_page` | Reads a bounded, cursor-paged slice of a will's audit trail | `will_id`, `cursor`, `limit` | `Vec<WillStatusTransition>` |
-| `guardian_trigger` | Casts a guardian vote; 2 of 3 forces an early release | `will_id`, `guardian` | — |
-| `guardian_cancel_pending_will` | Allows a guardian quorum to cancel a stalled `PendingConfirmation` will and refund the owner (callable after the confirmation deadline passes) | `will_id`, `guardian` | — |
+Generated from `contracts/will/src/lib.rs` by `scripts/gen-api-table.py`; CI runs it with `--check` so signature drift fails the build. See the doc comments in `lib.rs` for behaviour.
+
+<!-- api-table:begin -->
+| Function | Parameters | Returns |
+|---|---|---|
+| `create_will` | `owner`, `tokens`, `beneficiaries`, `checkin_period_days`, `grace_period_days`, `guardians`, `guardian_threshold`, `keeper_bounty_bps`, `confirmation_delay_seconds` | `u64` |
+| `confirm_will` | `will_id`, `owner` | — |
+| `refund_unconfirmed_will` | `will_id` | — |
+| `guardian_cancel_pending_will` | `will_id`, `guardian` | — |
+| `check_in` | `will_id`, `caller` | — |
+| `set_delegate` | `will_id`, `owner`, `delegate` | — |
+| `set_keeper_bounty_token` | `will_id`, `owner`, `token` | — |
+| `batch_check_in` | `will_ids`, `caller` | — |
+| `trigger_will` | `will_id` | — |
+| `emergency_checkin` | `will_id`, `owner` | — |
+| `request_grace_extension` | `will_id`, `owner`, `extra_days` | — |
+| `release_inheritance` | `will_id`, `caller` | — |
+| `retry_failed_payout` | `will_id`, `token`, `recipient` | — |
+| `batch_retry_failed_payouts` | `requests` | `Vec<FailedPayoutRequest>` |
+| `redirect_failed_payout` | `will_id`, `token`, `old_recipient`, `new_recipient`, `caller` | — |
+| `cancel_will` | `will_id`, `owner` | — |
+| `close_will` | `will_id`, `owner` | — |
+| `update_beneficiaries` | `will_id`, `owner`, `beneficiaries` | — |
+| `renounce_beneficiary` | `will_id`, `beneficiary` | — |
+| `update_guardians` | `will_id`, `owner`, `guardians` | — |
+| `update_guardians_weighted` | `will_id`, `owner`, `guardians`, `guardian_threshold` | — |
+| `update_periods` | `will_id`, `owner`, `checkin_period_days`, `grace_period_days` | — |
+| `update_will_settings` | `will_id`, `owner`, `beneficiaries`, `guardians`, `checkin_period_days`, `grace_period_days` | — |
+| `top_up` | `will_id`, `owner`, `token`, `amount` | — |
+| `get_contract_version` | `_env` | `u32` |
+| `get_will` | `will_id` | `Will` |
+| `get_will_status` | `will_id` | `WillStatus` |
+| `get_time_until_deadline` | `will_id` | `Option<i64>` |
+| `get_guardian_vote_status` | `will_id`, `guardian` | `Option<GuardianVoteRecord>` |
+| `get_guardian_votes` | `will_id` | `Vec<(Address, GuardianVoteRecord)>` |
+| `get_protocol_stats` | — | `ProtocolStats` |
+| `audit_protocol_stats` | — | `ProtocolStatsAudit` |
+| `repair_protocol_stats` | `caller` | `ProtocolStats` |
+| `recompute_protocol_stats_chunk` | `start_id`, `batch_size` | `(ProtocolStats, u64, bool)` |
+| `get_triggered_wills` | `cursor`, `limit` | `Vec<u64>` |
+| `get_wills_by_owner` | `owner`, `cursor`, `limit` | `Vec<Will>` |
+| `get_owner_stats` | `owner` | `OwnerStats` |
+| `get_wills_by_owner_and_status` | `owner`, `status`, `cursor`, `limit` | `Vec<Will>` |
+| `get_owner_status_page` | `owner`, `status`, `cursor`, `limit` | `WillPage` |
+| `get_wills_by_beneficiary` | `beneficiary`, `cursor`, `limit` | `Vec<Will>` |
+| `get_wills` | `ids` | `Vec<Will>` |
+| `guardian_trigger` | `will_id`, `guardian`, `reason` | — |
+| `guardian_cancel_trigger` | `will_id`, `guardian` | — |
+| `accept_guardian_role` | `will_id`, `guardian` | — |
+| `reject_guardian_role` | `will_id`, `guardian` | — |
+| `reset_guardian_consent` | `will_id`, `guardian` | — |
+| `clone_will` | `source_will_id`, `owner`, `tokens` | `u64` |
+| `batch_create_wills` | `owner`, `will_specs` | `Vec<u64>` |
+| `migrate_will` | `will_id`, `owner` | — |
+| `migrate_owner_portfolio` | `old_owner`, `new_owner` | — |
+| `merge_wills` | `owner`, `will_id_a`, `will_id_b` | — |
+| `get_will_history` | `will_id` | `Vec<WillStatusTransition>` |
+| `get_will_history_page` | `will_id`, `cursor`, `limit` | `Vec<WillStatusTransition>` |
+| `archive_will` | `will_id` | — |
+| `get_archived_will` | `will_id` | `Will` |
+| `extend_archived_will_ttl` | `will_id` | — |
+| `split_will` | `will_id`, `owner`, `beneficiaries_to_split`, `tokens` | `u64` |
+| `add_hashed_beneficiary` | `will_id`, `owner`, `commitment`, `percentage` | — |
+| `reveal_and_claim` | `will_id`, `claimant`, `preimage` | — |
+<!-- api-table:end -->
 
 ### Release safety
 
@@ -184,7 +277,7 @@ If you need more than 10 heirs, you can:
 - **Guardian votes are deduplicated.** Vote weight and count are recomputed from per-guardian records on every vote, so each guardian counts at most once and expired votes drop out; re-voting after expiry refreshes the vote instead of adding to it. The same applies to `guardian_cancel_trigger`.
 - **Keeper bounty comes out of the will.** The bounty is deducted from the estate before the beneficiary split rather than paid on top of it. By default it is deducted **proportionally from every token the will holds** — each token contributes `floor(balance * keeper_bounty_bps / 10_000)` of itself — so a keeper's incentive scales with the estate's whole value instead of whichever token was locked first (#109). The owner can instead concentrate the whole bounty on one token (e.g. the native asset, to cover the keeper's gas) with `set_keeper_bounty_token`.
 - **Balances are conserved and rounding is deterministic (#32).** For every token, `keeper_bounty + sum(beneficiary_shares) + owner_refund + hashed_reserve == token_balance` strictly holds with zero dust stranded in the contract, or the release aborts with `DistributionMismatch`. Each of the first `N - 1` percentage beneficiaries receives `floor(remaining * basis_points / 10_000)` via integer truncation toward zero, leaving at most `N - 1` stroops of rounding remainder per token. The final `Allocation::Percentage` beneficiary in `will.beneficiaries` deterministically absorbs `percentage_remaining` (their proportional share plus the rounding remainder) across every token held by the will; for `FixedAmount`-only wills, any unallocated remainder is refunded to the will's owner.
-- **Delegate role separation (#31).** `set_delegate` rejects self-delegation (`delegate == owner`) and contract-self-delegation (`delegate == env.current_contract_address()`) with `WillError::InvalidDelegate` (code `58`). Guardians and beneficiaries remain eligible to serve as delegates when the owner wishes to delegate routine `check_in` maintenance, because a delegate's authority is strictly confined to resetting the check-in timer.
+- **Delegate role separation (#31).** `set_delegate` rejects self-delegation (`delegate == owner`) and contract-self-delegation (`delegate == env.current_contract_address()`) with `WillError::InvalidDelegate` (code `59`; code `58` is `UnclaimedHashedBeneficiary`). Guardians and beneficiaries remain eligible to serve as delegates when the owner wishes to delegate routine `check_in` maintenance, because a delegate's authority is strictly confined to resetting the check-in timer.
 
 `checkin_period_days` and `grace_period_days` passed to `create_will` must each be at least `1` day (and at most `MAX_PERIOD_DAYS`); a value of `0` panics with `WillError::InvalidPeriod`.
 
@@ -392,9 +485,9 @@ stellar keys generate deployer --network testnet --fund
 DEPLOY_IDENTITY=deployer ./scripts/deploy-testnet.sh
 ```
 
-Requires `stellar-cli` (same version as [Local Setup](#local-setup)) and a funded testnet identity passed via `DEPLOY_IDENTITY`. `NETWORK` and `RPC_URL` are optional overrides — see the script header for details.
+Requires `stellar-cli` 22.0.0 (the version pinned in the [tested toolchain matrix](#tested-toolchain-matrix)) and a funded testnet identity passed via `DEPLOY_IDENTITY`. `NETWORK` and `RPC_URL` are optional overrides — see the script header for details.
 
-After running it, review and commit the updated `deployments/testnet.json` on its own — see [CONTRIBUTING.md](./CONTRIBUTING.md#updating-deploymentstestnetjson-after-a-redeploy) for the full checklist. A scheduled CI job also checks daily that this file's contract id still matches the on-chain wasm, so a forgotten update won't drift silently — see [Testnet Deployment Drift Check](.github/workflows/testnet-drift-check.yml).
+After running it, review and commit the updated `deployments/testnet.json` on its own — see [CONTRIBUTING.md](./CONTRIBUTING.md#updating-deploymentstestnetjson-after-a-redeploy) for the full checklist. A scheduled (and manually dispatchable) CI job runs the read-only [`scripts/check-testnet-drift.sh`](./scripts/check-testnet-drift.sh) daily, comparing the live contract bytecode hash with this file's `wasmHash`; it exits `1` on demonstrated drift and `2` on RPC/fetch failure or a placeholder record, and never deploys or edits the record — see [Testnet Deployment Drift Check](.github/workflows/testnet-drift-check.yml).
 
 ## Documentation
 
@@ -420,23 +513,53 @@ This repo participates in the **Stellar Wave Program** on [Drips](https://drips.
 
 ## Handsoff notes
 
+> [!NOTE]
+> This section preserves the original handoff notes **as history**. Each entry
+> keeps its original text and carries a *verified disposition* describing what
+> the source at `3210249c79d425b56842a555e77edbf86cdd638f` actually does today.
+> Historical notes are not live findings. A disposition of "superseded" or
+> "historical" means the claim no longer describes the code; it does **not**
+> mean every authorization path has been audited. Genuinely unresolved items
+> are listed separately under [Open findings](#open-findings) below.
+
+### Historical notes and dispositions
+
 <!-- handsoff-issue-436 -->
-- #436: Will owner validation is weak: no check that the caller is the will owner before allowing cancellations or updates, relying instead on SDK-side logic
+- **#436 (historical):** "Will owner validation is weak: no check that the caller is the will owner before allowing cancellations or updates, relying instead on SDK-side logic"
+  - **Disposition: superseded.** Owner validation is enforced on-chain, not by the SDK. `cancel_will` (`contracts/will/src/lib.rs`) calls `owner.require_auth()` and then `load_owned`, which verifies the persisted owner against the supplied address and fails with `WillError::NotOwner` (code `2`) on mismatch. The same `require_auth` + `load_owned` pattern guards the other owner-only entry points (`check_in`, `emergency_checkin`, `update_beneficiaries`, `top_up`, `close_will`, etc.).
+  - **Caveat:** this disposition records the owner-auth path only. It is not a claim that all authorization paths (guardians, delegates, keepers, beneficiaries) have been audited — see [#47](https://github.com/willi-d7/williams-contracts/issues/47) for the broader authorization-coverage request.
 
 <!-- handsoff-issue-438 -->
-- #438: allocate_funds returns a Map of beneficiary to share, but the Map insertion order is arbitrary, so distribute must not depend on processing beneficiaries in a specific orde
+- **#438 (historical):** "allocate_funds returns a Map of beneficiary to share, but the Map insertion order is arbitrary, so distribute must not depend on processing beneficiaries in a specific orde"
+  - **Disposition: historical — symbol removed.** No `allocate_funds` symbol exists in the current source. `distribute` builds an ordered **vector transfer plan** (a `Vec` of per-token, per-recipient transfers) rather than a `Map`, so the arbitrary-insertion-order concern does not apply to the current implementation. The deterministic ordering and rounding rules are documented under [Release safety](#release-safety).
 
 <!-- handsoff-issue-115 -->
-- #115: Storage Tombstone Fragmentation Post-Archival Consumes Ledger Rent
+- **#115 (historical):** "Storage Tombstone Fragmentation Post-Archival Consumes Ledger Rent"
+  - **Disposition: retained as audit evidence.** No verified fix is recorded here; treat as an open concern unless closed in the issue tracker.
 
 <!-- handsoff-issue-116 -->
-- #116: Excessive Memory Clone Operations in merge_beneficiaries and merge_guardians
+- **#116 (historical):** "Excessive Memory Clone Operations in merge_beneficiaries and merge_guardians"
+  - **Disposition: retained as audit evidence.** No verified fix is recorded here; treat as an open concern unless closed in the issue tracker.
 
 <!-- handsoff-issue-65 -->
-- #65: Fixed-Amount Beneficiaries Cannot Receive Secondary Tokens Deposited in Multi-Token Wills
+- **#65 (historical):** "Fixed-Amount Beneficiaries Cannot Receive Secondary Tokens Deposited in Multi-Token Wills"
+  - **Disposition: retained as audit evidence.** No verified fix is recorded here; treat as an open concern unless closed in the issue tracker.
 
 <!-- handsoff-issue-67 -->
-- #67: update_guardians_weighted Permits Assigning Zero Weight to Guardians
+- **#67 (historical):** "update_guardians_weighted Permits Assigning Zero Weight to Guardians"
+  - **Disposition: superseded in part.** `update_guardians_weighted` now normalises a weight of `0` to `1` (see `MAX_GUARDIAN_WEIGHT` in [Contract Constants](#contract-constants)), so a zero-weight guardian is no longer possible.
 
 <!-- handsoff-issue-68 -->
 - #68: Guardian Consent Status Survives Unchecked Across Guardian Weight Updates
+
+<!-- handsoff-issue-187 -->
+- #187: Allow hashed claims after guardian release without waiting for inactivity deadlines
+
+<!-- handsoff-issue-188 -->
+- #188: Avoid the overflowing multiplication in hashed pool share calculation
+
+<!-- handsoff-issue-189 -->
+- #189: Keep hashed claim payouts from subtracting already removed protocol totals
+
+<!-- handsoff-issue-190 -->
+- #190: Define an allocation-preserving policy for merges with different token portfolios

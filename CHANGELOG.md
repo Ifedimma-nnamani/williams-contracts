@@ -10,6 +10,9 @@ gets its own [contract spec artifact](./spec) once exported.
 
 ## [Unreleased]
 
+- Apply the 60-second check-in interval to batches. The batch event lists
+  only wills that were updated and is omitted when none were eligible (#202).
+
 ### Security
 - `release_inheritance` re-reads the will from storage and re-validates that
   it is still `Triggered` (with a recorded `trigger_time`) immediately before
@@ -25,6 +28,19 @@ gets its own [contract spec artifact](./spec) once exported.
   confirmation time, and that account existence cannot be checked on-chain
   (failed payouts fall back to `retry_failed_payout`) (#493).
 ### Added
+- `get_failed_payout_amount(will_id, token, recipient)` (#212): read-only
+  exact-tuple query returning `Option<i128>` — the amount currently recorded
+  for a failed payout, or `None` when no record exists (never failed, or
+  already cleared by a successful retry/redirect). Lets recovery UIs show the
+  authoritative outstanding amount and detect already-resolved tuples without
+  simulating a mutating call; the record is independent of the parent will's
+  lifecycle, so the query still works after the will is archived or the payout
+  redirected.
+- `get_guardian_cancel_vote_status(will_id, guardian)` (#214): read-only
+  cancellation-vote query, distinct from the trigger-vote
+  `get_guardian_vote_status`. Applies the same expiry/consent rules as
+  cancellation tallying, so expired or withdrawn votes are reported
+  consistently with quorum; requires no authorization and mutates no state.
 - `redirect_failed_payout(will_id, token, old_recipient, new_recipient,
   caller)` (#19): moves a recorded failed payout — amount unchanged, no
   tokens leave the contract — to a new destination so a permanently stalled
@@ -44,6 +60,14 @@ gets its own [contract spec artifact](./spec) once exported.
   selection changes (#109).
 
 ### Changed
+- **Owner refunds isolate unavailable tokens (#213).** `cancel_will`,
+  `refund_unconfirmed_will` and `guardian_cancel_pending_will` now route each
+  token refund through the deferred-payout ledger (`pay_or_record_failure`)
+  instead of panicking transfers, so one paused token or blocked recipient no
+  longer rolls back refunds of every other token. Undelivered owner amounts are
+  recorded as failed payouts (exactly-once recoverable via
+  `retry_failed_payout` / `redirect_failed_payout`), while cancellation
+  statistics and index cleanup stay atomic and consistent.
 - **Keeper bounty token selection (#109).** `distribute` no longer pays the
   keeper bounty out of the first token in `will.balances` whose share rounds
   above zero — which on a multi-token estate arbitrarily favoured whichever
@@ -61,6 +85,13 @@ gets its own [contract spec artifact](./spec) once exported.
   documented `= 54` collided with `ConfirmationWindowNotExpired`).
 
 ### Fixed
+- **Trigger re-cooldown field integration (#174).** Restored the
+  `trigger_cooldown_until` field on `Will` and the `TRIGGER_COOLDOWN_SECONDS`
+  constant (one day), so `trigger_will` and `emergency_checkin` compile and
+  the re-trigger cooldown is distinct from the 90-day check-in deadline.
+  Creation, clone, split and legacy-migration paths default the field to `0`;
+  the v1.3.0 spec field list and the issue #104 regression test were updated
+  to document both deadlines.
 - **Merged-will guardian threshold (#17).** `merge_wills` no longer keeps the
   surviving will's `guardian_threshold` verbatim: the merged will adopts the
   stricter (larger) of the two source thresholds and re-validates it against

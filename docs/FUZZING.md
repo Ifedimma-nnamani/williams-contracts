@@ -6,7 +6,7 @@ The contract is fuzzed at two depths, both driving the same harness
 | | Engine | Toolchain | Runs in CI | Use it for |
 |---|---|---|---|---|
 | [`contracts/will/src/fuzz_test.rs`](../contracts/will/src/fuzz_test.rs) | `proptest` | stable | yes, on every PR | regressions, quick local feedback |
-| [`fuzz/`](../fuzz) | `cargo-fuzz` / libFuzzer | nightly | on demand + nightly schedule | deep, coverage-guided exploration |
+| [`fuzz/`](../fuzz) | `cargo-fuzz` / libFuzzer | nightly | on demand + bounded nightly schedule | deep, coverage-guided exploration |
 
 Keeping one harness behind both means a bug found by libFuzzer can be pinned as
 a `proptest` case (or a plain `#[test]`) without rewriting it.
@@ -121,12 +121,51 @@ instead of being ignored.
 
 A failing case is written to `contracts/will/proptest-regressions/` and replayed
 on every subsequent run. **Commit that file** — it is how a regression stays
-caught.
+caught. The repository's `.gitignore` deliberately does **not** ignore
+`proptest-regressions/` directories (root or nested), so these minimized inputs
+are tracked like any other source file. Only the generated corpora and build
+artifacts (`fuzz/corpus/`, `fuzz/artifacts/`, `target/`) stay ignored.
 
 ## Running cargo-fuzz
 
 libFuzzer needs a nightly toolchain, and works on Linux and macOS. (On Windows,
 use WSL, or rely on the `proptest` suite.)
+
+### Scheduled runs
+
+[`.github/workflows/fuzz.yml`](../.github/workflows/fuzz.yml) runs the
+coverage-guided targets automatically. It is triggered:
+
+- **on a nightly schedule** (`cron`, once per day), and
+- **manually** via `workflow_dispatch`, where you can override the per-target
+  time budget and pick a subset of targets.
+
+The campaign is deliberately bounded so it stays cheap and predictable:
+
+- **Target selection** — only the targets that compile and are listed in the
+  workflow's matrix (`create_will`, `update_beneficiaries`, `merge_wills`,
+  `split_will`) run. Targets whose implementation is still in progress are not
+  scheduled until they build.
+- **Time budget** — each target runs with a fixed `-max_total_time` (default
+  300 seconds) and a capped input size (`-max_len`), so a scheduled run cannot
+  hang or grow without limit.
+- **Corpus** — the seed corpus is cached between runs; a fresh run starts from
+  the committed corpus plus whatever the cache holds.
+
+### Crash artifacts
+
+If libFuzzer finds a failing input, the job fails and the input is uploaded as
+a workflow artifact (`fuzz-artifacts-<target>`), so it can be downloaded and
+replayed locally:
+
+```sh
+cargo +nightly fuzz run <target> fuzz/artifacts/<target>/crash-<hash>
+```
+
+Artifacts contain only the raw fuzz input bytes and the harness's decoded
+report — no secrets or environment data — and are retained for a limited
+period. Pin any crash as a `#[test]` in `contracts/will/src/fuzz_test.rs` so
+the stable `proptest` suite keeps it fixed.
 
 ```sh
 rustup toolchain install nightly
@@ -215,4 +254,4 @@ overflow would go unnoticed.
 2. Add `fuzz/fuzz_targets/<name>.rs` and a matching `[[bin]]` in
    `fuzz/Cargo.toml`.
 3. Add a `proptest` property in `fuzz_test.rs` driving the same runner, so the
-   new invariants are checked in CI too.
+   new invariants are checked on every PR.

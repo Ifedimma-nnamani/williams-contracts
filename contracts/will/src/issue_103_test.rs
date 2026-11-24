@@ -10,9 +10,7 @@ use soroban_sdk::{
     vec, Address, Env,
 };
 
-use crate::{
-    Allocation, Beneficiary, WillContract, WillContractClient, WillError, WillStatus,
-};
+use crate::{Allocation, Beneficiary, WillContract, WillContractClient, WillError, WillStatus};
 
 fn setup(env: &Env) -> (WillContractClient<'_>, Address, Address) {
     let owner = Address::generate(env);
@@ -47,8 +45,8 @@ fn make_create_call<'a>(
         &7,
         &vec![env],
         &0,
-        &Some(delay_seconds),
-        &0,
+        &None,
+        &delay_seconds,
     )
 }
 
@@ -58,16 +56,15 @@ fn create_will_rejects_sub_threshold_confirmation_delay() {
     env.mock_all_auths();
     env.ledger().set_timestamp(1_700_000_000);
 
-    let owner = Address::generate(&env);
     let heir = Address::generate(&env);
     let (client, owner, token_address) = setup(&env);
 
     let err = client
         .try_create_will(
             &owner,
-            &vec![env, (token_address.clone(), 1_000_000_i128)],
+            &vec![&env, (token_address.clone(), 1_000_000_i128)],
             &vec![
-                env,
+                &env,
                 Beneficiary {
                     address: heir.clone(),
                     allocation: Allocation::Percentage(10_000),
@@ -75,10 +72,10 @@ fn create_will_rejects_sub_threshold_confirmation_delay() {
             ],
             &90,
             &7,
-            &vec![env],
+            &vec![&env],
             &0,
-            &Some(5), // 5 seconds — below MIN_CONFIRMATION_DELAY (300s)
-            &0,
+            &None,
+            &5, // below MIN_CONFIRMATION_DELAY (300s)
         )
         .unwrap_err()
         .unwrap();
@@ -95,7 +92,6 @@ fn create_will_accepts_zero_delay() {
     env.mock_all_auths();
     env.ledger().set_timestamp(1_700_000_000);
 
-    let owner = Address::generate(&env);
     let heir = Address::generate(&env);
     let (client, owner, token_address) = setup(&env);
 
@@ -114,7 +110,6 @@ fn create_will_accepts_delay_at_threshold() {
     env.mock_all_auths();
     env.ledger().set_timestamp(1_700_000_000);
 
-    let owner = Address::generate(&env);
     let heir = Address::generate(&env);
     let (client, owner, token_address) = setup(&env);
 

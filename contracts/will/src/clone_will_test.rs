@@ -152,6 +152,45 @@ fn clone_does_not_yet_increment_active_will_count() {
     );
 }
 
+// --- Tests for issue #210 ---
+
+#[test]
+fn clone_clears_a_bounty_token_it_does_not_hold() {
+    let (env, contract_id, owner, token_address, source_id) = setup();
+    let client = WillContractClient::new(&env, &contract_id);
+    client.set_keeper_bounty_token(&source_id, &owner, &Some(token_address.clone()));
+
+    // Clone funded with a different token: the targeted bounty from the
+    // source is no longer held and must not be copied.
+    let other = env
+        .register_stellar_asset_contract_v2(owner.clone())
+        .address();
+    StellarAssetClient::new(&env, &other).mint(&owner, 1_000_000);
+    let clone_id = client.clone_will(
+        &source_id,
+        &owner,
+        &vec![&env, (other.clone(), 500_000_i128)],
+    );
+    assert_eq!(client.get_will(&clone_id).keeper_bounty_token, None);
+}
+
+#[test]
+fn clone_keeps_a_bounty_token_it_still_holds() {
+    let (env, contract_id, owner, token_address, source_id) = setup();
+    let client = WillContractClient::new(&env, &contract_id);
+    client.set_keeper_bounty_token(&source_id, &owner, &Some(token_address.clone()));
+
+    let clone_id = client.clone_will(
+        &source_id,
+        &owner,
+        &vec![&env, (token_address.clone(), 500_000_i128)],
+    );
+    assert_eq!(
+        client.get_will(&clone_id).keeper_bounty_token,
+        Some(token_address)
+    );
+}
+
 // --- Tests for issue #53 ---
 
 #[test]

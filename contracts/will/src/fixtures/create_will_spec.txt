@@ -26,16 +26,27 @@
 # documentation edits are exempt from version bumps: they update the
 # documentation artifact only and remain visible in review.
 #
-# HOW TO UPDATE
-# -------------
+# READ-ONLY BY DEFAULT
+# --------------------
+# A normal `cargo test` run never writes this file. The verifier test
+# (`test_spec_fixture_create_will`) only reads the fixture and fails if it
+# is missing, uninitialized (contains the `GENERATE` placeholder), or does
+# not match the spec generated at test time. This keeps ABI regressions
+# visible and prevents test runs from dirtying a review checkout.
+#
+# HOW TO UPDATE (EXPLICIT OPT-IN)
+# -------------------------------
 # When you intentionally change the `create_will` signature (new parameter,
-# type change, rename), update this fixture by running:
+# type change, rename), regenerate this fixture by running the ignored
+# updater test explicitly:
 #
-#   cargo test -p will --lib test_spec_fixture_create_will_update -- --nocapture
+#   cargo test -p will --lib test_spec_fixture_create_will_update -- --ignored --nocapture
 #
-# That test prints the new hex to stdout and writes it here automatically.
+# That test prints the new hex to stdout and writes it here. It is marked
+# `#[ignore]` so it never runs as part of a standard `cargo test`.
 # Commit both the code change and the updated fixture in the same PR so
 # reviewers can see exactly what changed in the encoded spec.
+=======
 #
 # SDK COORDINATION
 # ----------------

@@ -79,7 +79,7 @@ const SECONDS_PER_DAY: u64 = 86_400;
 /// make `migrate_will` no-op on every will and the version stamp would stop
 /// meaning anything (#367).
 #[allow(dead_code)]
-pub const CURRENT_SCHEMA_VERSION: u32 = 2;
+pub const CURRENT_SCHEMA_VERSION: u32 = 3;
 
 #[contracttype]
 #[derive(Clone)]
@@ -90,6 +90,8 @@ pub(crate) enum DataKey {
     ProtocolStats,
     /// Active will count counter.
     ActiveWillCount,
+    /// Set when a repair has rebuilt all token totals from the live wills.
+    LockedTotalsRebuilt,
     /// List of distinct tokens currently with active locked balances in the protocol.
     ProtocolTokens,
     /// Discrete total locked amount for a single token across the protocol.
@@ -98,6 +100,10 @@ pub(crate) enum DataKey {
     Will(u64),
     /// List of will ids owned by an address.
     OwnerWills(Address),
+    /// Discovery alias installed by portfolio migration (#207): maps the
+    /// authorization owner to the address whose indexes now hold its wills.
+    /// Authorization is never redirected — only index/discovery lookups are.
+    OwnerDiscoveryAlias(Address),
     /// List of will ids an address is named as a beneficiary of.
     BeneficiaryWills(Address),
     /// A guardian's vote record: stores `(timestamp, reason)` for time-weighted expiry.
@@ -181,6 +187,8 @@ pub fn get_total_locked(env: &Env, token: &Address) -> i128 {
     let key = DataKey::TotalLocked(token.clone());
     if let Some(val) = env.storage().persistent().get(&key) {
         val
+    } else if env.storage().instance().has(&DataKey::LockedTotalsRebuilt) {
+        0
     } else if let Some(val) = env.storage().instance().get(&key) {
         val
     } else if let Some(stats) = env
@@ -276,7 +284,7 @@ pub fn get_protocol_stats(env: &Env) -> ProtocolStats {
     }
 }
 
-/// Persists protocol statistics into discrete storage entries and instance storage.
+/// Replaces all protocol statistics with an authoritative rebuild.
 pub fn save_protocol_stats(env: &Env, stats: &ProtocolStats) {
     set_active_will_count(env, stats.active_will_count);
     let old_tokens = get_protocol_tokens(env);
@@ -298,7 +306,11 @@ pub fn save_protocol_stats(env: &Env, stats: &ProtocolStats) {
     env.storage()
         .instance()
         .set(&DataKey::ProtocolTokens, &tokens);
-    env.storage().instance().set(&DataKey::ProtocolStats, stats);
+    env.storage().instance().remove(&DataKey::ProtocolStats);
+    // Old instance totals outside the token index cannot be enumerated here.
+    env.storage()
+        .instance()
+        .set(&DataKey::LockedTotalsRebuilt, &true);
 }
 
 /// Increments the active-will counter by one.
@@ -345,6 +357,22 @@ pub fn adjust_locked_value(env: &Env, token: &Address, delta: i128) {
     } else {
         env.storage().persistent().remove(&key);
         let tokens = get_protocol_tokens(env);
+        let instance = env.storage().instance();
+        if !instance.has(&DataKey::LockedTotalsRebuilt) {
+            instance.remove(&key);
+            // Preserve the remaining snapshot totals for tokens that have
+            // yet to migrate to discrete storage.
+            if let Some(mut stats) = instance.get::<_, ProtocolStats>(&DataKey::ProtocolStats) {
+                let mut remaining = Vec::new(env);
+                for entry in stats.total_locked_by_token.iter() {
+                    if entry.token != *token {
+                        remaining.push_back(entry);
+                    }
+                }
+                stats.total_locked_by_token = remaining;
+                instance.set(&DataKey::ProtocolStats, &stats);
+            }
+        }
         let mut updated = Vec::new(env);
         for t in tokens.iter() {
             if t != *token {
@@ -376,6 +404,27 @@ pub fn is_live_status(status: WillStatus) -> bool {
         status,
         WillStatus::PendingConfirmation | WillStatus::Active | WillStatus::Triggered
     )
+}
+
+/// Reads a `DataKey::Will` entry through the schema-compatible decoder.
+///
+/// Every read of a will entry in this module goes through here so a legacy
+/// layout is decoded into the current `Will` shape before use (issue #177).
+/// A missing key stays `None`; a present key that matches no known layout
+/// panics with `UnsupportedSchemaVersion` instead of being silently skipped
+/// or converted into a bogus "not found".
+fn decode_will_entry(env: &Env, id: u64) -> Option<Will> {
+    let raw: Option<Val> = env
+        .storage()
+        .persistent()
+        .get(&DataKey::Will(id));
+    match raw {
+        None => None,
+        Some(raw) => match migration::decode_will(env, &raw) {
+            Ok(will) => Some(will),
+            Err(err) => panic_with_error!(env, err),
+        },
+    }
 }
 
 /// Recomputes protocol statistics across a bounded range of will IDs: `[start_id, start_id + batch_size)`.
@@ -418,11 +467,7 @@ pub fn recompute_protocol_stats_chunk(
     let mut id = start_id;
 
     while id <= end_id {
-        if let Some(will) = env
-            .storage()
-            .persistent()
-            .get::<_, Will>(&DataKey::Will(id))
-        {
+        if let Some(will) = decode_will_entry(env, id) {
             if is_live_status(will.status) {
                 active_will_count += 1;
                 for (token, amount) in will.balances.iter() {
@@ -479,11 +524,7 @@ pub fn recompute_protocol_stats(env: &Env) -> ProtocolStats {
     let mut totals: Map<Address, i128> = Map::new(env);
     let mut id = 1u64;
     while id <= last_id {
-        if let Some(will) = env
-            .storage()
-            .persistent()
-            .get::<_, Will>(&DataKey::Will(id))
-        {
+        if let Some(will) = decode_will_entry(env, id) {
             if is_live_status(will.status) {
                 active_will_count += 1;
                 for (token, amount) in will.balances.iter() {
@@ -549,11 +590,7 @@ pub fn compare_protocol_stats(
     let mut computed_totals: Map<Address, i128> = Map::new(env);
     let mut id = 1u64;
     while id <= last_id {
-        if let Some(will) = env
-            .storage()
-            .persistent()
-            .get::<_, Will>(&DataKey::Will(id))
-        {
+        if let Some(will) = decode_will_entry(env, id) {
             if is_live_status(will.status) {
                 computed_active += 1;
                 for (token, amount) in will.balances.iter() {
@@ -606,7 +643,7 @@ pub fn compare_protocol_stats(
 /// it just stops being renewed.
 pub fn save_will(env: &Env, will: &Will) {
     let key = DataKey::Will(will.id);
-    if let Some(previous) = env.storage().persistent().get::<_, Will>(&key) {
+    if let Some(previous) = decode_will_entry(env, will.id) {
         for guardian in previous.guardians.iter() {
             let address = guardian.address.clone();
             let mut still_guardian = false;
@@ -632,6 +669,38 @@ pub fn save_will(env: &Env, will: &Will) {
             .persistent()
             .extend_ttl(&key, LIFETIME_THRESHOLD, BUMP_AMOUNT);
     }
+}
+
+/// Extends the persistent storage TTL of a live will record without modifying
+/// its contents.
+///
+/// # Rent policy for Released wills with outstanding hashed claims
+///
+/// [`save_will`] deliberately stops renewing the TTL of terminal wills
+/// (`Released` / `Cancelled`) so fully discharged records age out and are
+/// collected by Soroban's state archival system. A `Released` will that still
+/// carries unpaid hashed reserves in `Will::balances`, however, must remain
+/// loadable until every beneficiary has claimed: `reveal_and_claim` reads the
+/// record and writes the remaining balances back, and a TTL lapse in between
+/// would force a restore of the entry before the next claim could succeed.
+///
+/// This helper is the explicit, narrowly scoped keepalive for exactly that
+/// case. It only ever extends an existing `DataKey::Will(will_id)` entry — it
+/// never creates, mutates, or re-validates the will, so entitlements are
+/// untouched — and it is a no-op returning [`WillError::WillNotFound`] when the
+/// record is absent (never created, explicitly archived, or already collected).
+/// Callers are responsible for only invoking it while real outstanding claims
+/// remain; once a record is fully discharged it must be left to expire under
+/// the normal terminal rent behaviour.
+pub fn extend_will_ttl(env: &Env, will_id: u64) -> Result<(), WillError> {
+    let key = DataKey::Will(will_id);
+    if !env.storage().persistent().has(&key) {
+        return Err(WillError::WillNotFound);
+    }
+    env.storage()
+        .persistent()
+        .extend_ttl(&key, LIFETIME_THRESHOLD, BUMP_AMOUNT);
+    Ok(())
 }
 
 /// Loads a will by id, returning `WillError::WillNotFound` if it does not exist.
@@ -763,11 +832,7 @@ fn trim_stale_beneficiary_index(env: &Env, beneficiary: &Address) {
     let mut found_stale = false;
 
     for id in ids.iter() {
-        let is_live = match env
-            .storage()
-            .persistent()
-            .get::<_, Will>(&DataKey::Will(id))
-        {
+        let is_live = match decode_will_entry(env, id) {
             // Will entry is present: keep it only if it is in a non-terminal
             // (live) state.
             Some(will) => is_live_status(will.status),
@@ -803,9 +868,32 @@ fn assert_single_index_capacity(env: &Env, key: &DataKey) {
     }
 }
 
+/// Follows the portfolio-migration discovery aliases for `owner` (#207).
+///
+/// `migrate_owner_portfolio` moves the index entries to a new discovery
+/// address but deliberately leaves `Will.owner` unchanged (it remains the
+/// authorization/refund owner). Lifecycle writes therefore still arrive with
+/// the original owner, and must be redirected here so the destination
+/// portfolio stays coherent. The hop limit bounds the work and stops cycles.
+pub fn discovery_owner(env: &Env, owner: &Address) -> Address {
+    let mut current = owner.clone();
+    for _ in 0..8 {
+        let next: Option<Address> = env
+            .storage()
+            .persistent()
+            .get(&DataKey::OwnerDiscoveryAlias(current.clone()));
+        match next {
+            Some(next) if next != current => current = next,
+            _ => break,
+        }
+    }
+    current
+}
+
 /// Adds `will_id` to the index of wills owned by `owner`, if not already present.
 pub fn index_by_owner(env: &Env, owner: &Address, will_id: u64) {
-    index_push(env, DataKey::OwnerWills(owner.clone()), will_id);
+    let owner = discovery_owner(env, owner);
+    index_push(env, DataKey::OwnerWills(owner), will_id);
 }
 
 /// Extends the TTL of the `OwnerWills` index for `owner` without modifying
@@ -876,7 +964,8 @@ pub fn remove_beneficiary_index(env: &Env, beneficiary: &Address, will_id: u64) 
 /// Uses order-preserving removal to maintain the monotonic ordering invariant
 /// that `paginate_ids` depends on.
 pub fn remove_owner_index(env: &Env, owner: &Address, will_id: u64) {
-    let key = DataKey::OwnerWills(owner.clone());
+    let owner = discovery_owner(env, owner);
+    let key = DataKey::OwnerWills(owner);
     let Some(ids) = env.storage().persistent().get::<_, Vec<u64>>(&key) else {
         return;
     };
@@ -901,6 +990,8 @@ pub fn remove_owner_index(env: &Env, owner: &Address, will_id: u64) {
 /// read-only query from the owner's dashboard counts as activity for the
 /// purpose of keeping the index alive (issue #41).
 pub fn get_owner_wills(env: &Env, owner: &Address) -> Vec<u64> {
+    // Queries intentionally use the literal address: after migration the
+    // old owner's portfolio is empty and the destination owns the entries.
     let key = DataKey::OwnerWills(owner.clone());
     let ids: Option<Vec<u64>> = env.storage().persistent().get(&key);
     if ids.is_some() {
@@ -920,7 +1011,8 @@ pub fn get_owner_wills(env: &Env, owner: &Address) -> Vec<u64> {
 /// are skipped when the id is already present, matching the behaviour of the
 /// shared `index_push` helper used by `OwnerWills`.
 pub fn index_owner_status(env: &Env, owner: &Address, status: WillStatus, will_id: u64) {
-    let key = DataKey::OwnerStatusWills(owner.clone(), status);
+    let owner = discovery_owner(env, owner);
+    let key = DataKey::OwnerStatusWills(owner, status);
     let mut ids: Vec<u64> = env
         .storage()
         .persistent()
@@ -949,7 +1041,8 @@ pub fn index_owner_status(env: &Env, owner: &Address, status: WillStatus, will_i
 /// removal from the owner index on cancellation/release, or archival).
 /// Returns without writing when the id is absent.
 pub fn remove_owner_status_index(env: &Env, owner: &Address, status: WillStatus, will_id: u64) {
-    let key = DataKey::OwnerStatusWills(owner.clone(), status);
+    let owner = discovery_owner(env, owner);
+    let key = DataKey::OwnerStatusWills(owner, status);
     let Some(ids) = env.storage().persistent().get::<_, Vec<u64>>(&key) else {
         return;
     };
@@ -992,6 +1085,7 @@ pub fn transition_owner_status_index(
 /// Returns the ids from the per-owner, per-status index for `status`, also
 /// refreshing the TTL so a read-only query keeps the entry alive.
 pub fn get_owner_status_wills(env: &Env, owner: &Address, status: WillStatus) -> Vec<u64> {
+    // Literal address, matching `get_owner_wills` (issue #207).
     let key = DataKey::OwnerStatusWills(owner.clone(), status);
     let ids: Option<Vec<u64>> = env.storage().persistent().get(&key);
     if ids.is_some() {
@@ -1236,6 +1330,37 @@ pub fn reset_guardian_votes(env: &Env, will: &Will) {
     for guardian in will.guardians.iter() {
         let key = DataKey::GuardianVote(will.id, guardian.address.clone());
         env.storage().persistent().remove(&key);
+    }
+}
+
+/// Returns the timestamp of `guardian`'s cancel-trigger vote for `will_id`
+/// when that vote is still live at `now`, or `None` otherwise.
+///
+/// This is the read-only counterpart of [`has_guardian_cancel_voted`] and
+/// uses exactly the same liveness rule: the record must exist, must not be
+/// timestamped after `now`, and must satisfy [`vote_is_live`]. It therefore
+/// agrees with [`recount_guardian_cancel_votes`] about which votes count
+/// toward the cancel quorum, while additionally reporting *when* the vote was
+/// cast so recovery dashboards can show its remaining validity (#214).
+///
+/// Unlike the recount helpers this never mutates storage: an expired record is
+/// reported as `None` but left in place for the next recount pass to drop.
+pub fn get_guardian_cancel_vote(
+    env: &Env,
+    will_id: u64,
+    guardian: &Address,
+    now: u64,
+    expiry_days: u64,
+) -> Option<u64> {
+    let key = DataKey::GuardianCancelVote(will_id, guardian.clone());
+    let record = env
+        .storage()
+        .persistent()
+        .get::<_, GuardianVoteRecord>(&key)?;
+    if now >= record.timestamp && vote_is_live(now, record.timestamp, expiry_days) {
+        Some(record.timestamp)
+    } else {
+        None
     }
 }
 
@@ -1580,7 +1705,7 @@ pub fn get_history(env: &Env, will_id: u64) -> Vec<WillStatusTransition> {
 pub fn paginate_history(
     env: &Env,
     will_id: u64,
-    cursor: Option<u32>,
+    cursor: Option<u64>,
     limit: u32,
 ) -> Vec<WillStatusTransition> {
     let history = get_history(env, will_id);
@@ -1594,7 +1719,7 @@ pub fn paginate_history(
     // Treat the cursor as a seq value: include entries with seq > cursor.
     // `None` and `Some(0)` both start from the beginning because seq
     // counters start at 1.
-    let after_seq: u64 = cursor.map(|v| v as u64).unwrap_or(0);
+    let after_seq = cursor.unwrap_or(0);
 
     let mut count: u32 = 0;
     for entry in history.iter() {
@@ -1765,6 +1890,47 @@ pub fn remove_failed_payout(env: &Env, will_id: u64, token: &Address, recipient:
     env.storage().persistent().remove(&key);
 }
 
+/// Records a deferred **owner refund** for `(will_id, token, owner)` (#213).
+///
+/// Owner-refund paths (`cancel_will`, `refund_unconfirmed_will`,
+/// `guardian_cancel_pending_will`) use the same `FailedPayout` ledger as
+/// beneficiary distributions so that one unavailable token cannot roll back
+/// the refunds of every other token: the transfer is attempted, and on
+/// failure the outstanding amount is recorded here instead of panicking.
+///
+/// The record is keyed by the will id, token and the owner as recipient, so
+/// it is exactly-once recoverable through the existing
+/// `retry_failed_payout` / [`get_failed_payout`] / [`remove_failed_payout`]
+/// machinery — a retry delivers the amount and clears the record, and a
+/// second retry finds nothing left to pay.
+///
+/// Amounts are **accumulated** rather than overwritten: if a refund for the
+/// same tuple is deferred more than once (for example a partially delivered
+/// refund followed by another failure), the recorded liability is the sum of
+/// everything still owed, never just the latest attempt.
+pub fn record_failed_owner_refund(
+    env: &Env,
+    will_id: u64,
+    token: &Address,
+    owner: &Address,
+    amount: i128,
+) {
+    if amount <= 0 {
+        return;
+    }
+    let key = DataKey::FailedPayout(will_id, token.clone(), owner.clone());
+    let outstanding: i128 = env
+        .storage()
+        .persistent()
+        .get(&key)
+        .unwrap_or(0)
+        .saturating_add(amount);
+    env.storage().persistent().set(&key, &outstanding);
+    env.storage()
+        .persistent()
+        .extend_ttl(&key, LIFETIME_THRESHOLD, BUMP_AMOUNT);
+}
+
 /// Migrates the complete owner portfolio from `old_owner` to `new_owner`.
 ///
 /// This transfers both indexes:
@@ -1850,4 +2016,16 @@ pub fn migrate_owner_portfolio(env: &Env, old_owner: &Address, new_owner: &Addre
             .extend_ttl(&new_status_key, LIFETIME_THRESHOLD, BUMP_AMOUNT);
         env.storage().persistent().remove(&old_status_key);
     }
+
+    // Issue #207: persist the discovery alias. `Will.owner` is deliberately
+    // left unchanged — it remains the authorization/refund owner — but every
+    // subsequent index write for those wills arrives under that old address.
+    // The alias redirects those writes (and dashboard reads) to the
+    // destination portfolio so migrated discovery stays coherent through
+    // trigger/cancel/release/archive. Chains (A→B→C) are followed by
+    // `discovery_owner`, so repeated migrations work without rewriting older
+    // aliases.
+    env.storage()
+        .persistent()
+        .set(&DataKey::OwnerDiscoveryAlias(old_owner.clone()), new_owner);
 }

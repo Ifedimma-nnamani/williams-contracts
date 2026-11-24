@@ -1,3 +1,117 @@
+name: Fuzz
+
+# Scheduled coverage-guided fuzzing (issue #233).
+#
+# docs/FUZZING.md promises that cargo-fuzz runs on demand *and* on a nightly
+# schedule. This workflow is that schedule: it installs a nightly toolchain
+# plus cargo-fuzz and runs a bounded libFuzzer campaign against the targets
+# listed below. It is intentionally separate from the stable PR jobs in
+# test.yml / audit.yml / scripts-check.yml so a fuzz failure never blocks a
+# normal pull request.
+#
+# Bounds:
+#   * FUZZ_SECONDS caps each target's campaign (-max_total_time).
+#   * FUZZ_TARGETS is an explicit allow-list; only add a target here once its
+#     build issues are resolved (see ISSUE-069 / #232 for the shared feature
+#     compile check).
+#
+# Crash inputs are written to fuzz/artifacts/<target>/ and uploaded as a
+# workflow artifact. Review them for sensitive data before sharing: they are
+# raw fuzzer inputs and may embed values from the corpus.
+
+on:
+  schedule:
+    # Nightly, offset from the audit schedule to avoid contention.
+    - cron: '43 3 * * *'
+  workflow_dispatch:
+    inputs:
+      seconds:
+        description: 'Per-target fuzz time in seconds (-max_total_time)'
+        required: false
+        default: '300'
+      targets:
+        description: 'Space-separated cargo-fuzz target names (blank = default allow-list)'
+        required: false
+        default: ''
+
+env:
+  # Default per-target campaign length for scheduled runs.
+  FUZZ_SECONDS: '300'
+  # Explicit allow-list of targets whose build issues are resolved.
+  # Keep this in sync with the target list in docs/FUZZING.md.
+  FUZZ_TARGETS: ''
+
+jobs:
+  fuzz:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install nightly Rust
+        uses: dtolnay/rust-toolchain@nightly
+
+      - name: Cache cargo registry
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+          key: ${{ runner.os }}-cargo-fuzz-${{ hashFiles('**/Cargo.lock') }}
+
+      - name: Install cargo-fuzz
+        run: cargo install --locked cargo-fuzz
+
+      - name: Resolve campaign parameters
+        id: params
+        run: |
+          seconds="${{ github.event.inputs.seconds }}"
+          targets="${{ github.event.inputs.targets }}"
+          if [ -z "$seconds" ]; then seconds="$FUZZ_SECONDS"; fi
+          if [ -z "$targets" ]; then targets="$FUZZ_TARGETS"; fi
+          if [ -z "$targets" ]; then
+            echo "::error::No fuzz targets configured; set FUZZ_TARGETS or pass the targets input."
+            exit 1
+          fi
+          echo "seconds=$seconds" >> "$GITHUB_OUTPUT"
+          echo "targets=$targets" >> "$GITHUB_OUTPUT"
+          echo "Running targets: $targets for ${seconds}s each"
+
+      - name: Run bounded fuzz campaign
+        id: fuzz
+        continue-on-error: true
+        run: |
+          set -o pipefail
+          status=0
+          for target in ${{ steps.params.outputs.targets }}; do
+            echo "::group::fuzz $target"
+            if ! cargo fuzz run "$target" -- \
+                -max_total_time="${{ steps.params.outputs.seconds }}" \
+                -print_final_stats=1; then
+              echo "::error::Fuzz target '$target' reported a failure; see fuzz/artifacts/$target/"
+              status=1
+            fi
+            echo "::endgroup::"
+          done
+          exit "$status"
+
+      - name: Upload crash inputs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: fuzz-artifacts-${{ github.run_id }}
+          path: fuzz/artifacts/
+          if-no-files-found: ignore
+          retention-days: 14
+
+      - name: Fail if a campaign reported a crash
+        if: steps.fuzz.outcome == 'failure'
+        run: |
+          echo "::error::One or more fuzz targets failed. Download the fuzz-artifacts artifact and replay with:"
+          echo "  cargo fuzz run <target> fuzz/artifacts/<target>/<crash-file>"
+          echo "Review crash inputs for sensitive data before sharing them."
+          exit 1
+
 name: Security Audit
 
 # Runs cargo-audit against the advisory allow-list in audit.toml on every
@@ -14,11 +128,18 @@ on:
   schedule:
     - cron: '17 4 * * *'
 
+# Least‑privilege permissions: only read access to the repository contents.
+permissions:
+  contents: read
+  issues: read
+  pull-requests: read
+  actions: read
+
 jobs:
   audit:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v4.1.1
 
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
@@ -44,7 +165,7 @@ jobs:
   deny:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v4.1.1
 
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
