@@ -222,3 +222,51 @@ fn archive_will_released_without_hashed_beneficiaries_succeeds() {
     // No hashed beneficiaries — archive must succeed immediately.
     client.archive_will(&will_id);
 }
+
+/// Issue #178: closing a released will must not strand unclaimed hashed
+/// shares. `reveal_and_claim` only accepts `Released`, so settling early
+/// would block the claim forever and bypass the archival guard.
+#[test]
+fn close_will_blocked_while_hashed_beneficiary_unclaimed() {
+    let (env, client, owner, _token, token_address) = setup();
+    let visible_beneficiary = Address::generate(&env);
+    let hashed_claimant = Address::generate(&env);
+
+    let will_id = client.create_will(
+        &owner,
+        &vec![&env, (token_address, 1_000_000_i128)],
+        &vec![
+            &env,
+            Beneficiary {
+                address: visible_beneficiary,
+                allocation: Allocation::Percentage(5_000),
+            },
+        ],
+        &90,
+        &7,
+        &vec![&env],
+        &0,
+        &None,
+        &0,
+    );
+    let preimage = preimage_for(&env, &hashed_claimant, 0xcd);
+    let commitment = commitment_for(&env, &preimage);
+    client.add_hashed_beneficiary(&will_id, &owner, &commitment, &5_000);
+
+    advance(&env, 91);
+    client.trigger_will(&will_id);
+    advance(&env, 8);
+    client.release_inheritance(&will_id, &None);
+
+    assert_eq!(
+        client.try_close_will(&will_id, &owner),
+        Err(Ok(WillError::UnclaimedHashedBeneficiary.into())),
+        "close_will must fail while a hashed share is unclaimed"
+    );
+    assert_eq!(client.get_will(&will_id).status, WillStatus::Released);
+
+    client.reveal_and_claim(&will_id, &hashed_claimant, &preimage);
+    client.close_will(&will_id, &owner);
+    assert_eq!(client.get_will(&will_id).status, WillStatus::Settled);
+    client.archive_will(&will_id);
+}

@@ -8,6 +8,16 @@ name: Scripts Check
 # deployment logic an actual end-to-end smoke test rather than just a
 # syntax check.
 #
+# Issue #296: the offline-suite step runs scripts/test/run-offline-suite.sh,
+# a command-stub harness that checks exit propagation, cleanup and command
+# ordering without a network, identity, Docker daemon or deployment.
+#
+# Issue #298: the workflow-lint job statically validates every maintained
+# workflow definition with a pinned actionlint release, catching invalid
+# expression contexts, unsupported workflow keys and bad action inputs
+# before GitHub ever interprets them.  The same command is available
+# locally via scripts/check-workflows.sh.
+#
 # The integration-test job that used to run integration_test.sh end-to-end
 # against a local Soroban network was removed: it depended on installing
 # stellar-cli with `--features opt`, a feature that no longer exists on the
@@ -20,6 +30,13 @@ on:
   pull_request:
     branches: [main]
 
+# Least‑privilege permissions: only read access to the repository.
+permissions:
+  contents: read
+  issues: read
+  pull-requests: read
+  actions: read
+
 env:
   # Issue #254: pinned Stellar CLI version. Bumping this value changes the
   # cache key below, invalidating any previously cached executable.
@@ -29,7 +46,7 @@ jobs:
   lint:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v4.1.1
 
       # Issue #255: discover every shell script under both scripts/ and
       # .github/scripts/ deterministically so new guards are picked up
@@ -51,6 +68,9 @@ jobs:
             fi
           done
 
+      - name: Check README function table matches lib.rs (#235)
+        run: python3 scripts/gen-api-table.py --check
+
       - name: Install shellcheck
         run: sudo apt-get update && sudo apt-get install -y shellcheck
 
@@ -70,6 +90,33 @@ jobs:
               exit 1
             fi
           done
+
+      - name: Run offline command-stub suite
+        run: scripts/test/run-offline-suite.sh
+
+  # Issue #298: statically validate the workflow definitions themselves.
+  # actionlint is pinned to an exact release and installed from its
+  # published release tarball so the check is reproducible and needs no
+  # GitHub write access.  The same entrypoint runs locally.
+  workflow-lint:
+    runs-on: ubuntu-latest
+    env:
+      ACTIONLINT_VERSION: 1.7.7
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install pinned actionlint
+        run: |
+          set -euo pipefail
+          archive="actionlint_${ACTIONLINT_VERSION}_linux_amd64.tar.gz"
+          url="https://github.com/rhysd/actionlint/releases/download/v${ACTIONLINT_VERSION}/${archive}"
+          curl -fsSL "$url" -o "/tmp/${archive}"
+          tar -xzf "/tmp/${archive}" -C /tmp actionlint
+          sudo install -m 0755 /tmp/actionlint /usr/local/bin/actionlint
+          actionlint --version
+
+      - name: Validate workflow definitions
+        run: scripts/check-workflows.sh
 
   # Issue #78: execute deploy-testnet.sh logic against a local Stellar
   # standalone container so the deployment script is actually run, not merely

@@ -84,6 +84,7 @@ fn check_in_appends_a_sequenced_history_entry() {
     );
     assert_eq!(before.get(0).unwrap().seq, 1);
 
+    env.ledger().with_mut(|l| l.timestamp += 60);
     client.check_in(&will_id, &owner);
 
     let after = client.get_will_history(&will_id);
@@ -107,6 +108,7 @@ fn batch_check_in_appends_one_entry_per_will_with_independent_sequences() {
     let will_1 = create_basic_will(&env, &client, &owner, &token_address);
     let will_2 = create_basic_will(&env, &client, &owner, &token_address);
 
+    env.ledger().with_mut(|l| l.timestamp += 60);
     client.batch_check_in(&vec![&env, will_1, will_2], &owner);
 
     for will_id in [will_1, will_2] {
@@ -130,7 +132,9 @@ fn seq_continues_monotonically_across_a_status_change() {
     let (env, client, owner, token_address) = setup();
     let will_id = create_basic_will(&env, &client, &owner, &token_address);
 
+    env.ledger().with_mut(|l| l.timestamp += 60);
     client.check_in(&will_id, &owner);
+    env.ledger().with_mut(|l| l.timestamp += 60);
     client.check_in(&will_id, &owner);
 
     // Advance past the check-in deadline and trigger the will, then prove
@@ -155,11 +159,9 @@ fn history_trimming_leaves_a_detectable_gap_in_seq_never_a_duplicate() {
     let (env, client, owner, token_address) = setup();
     let will_id = create_basic_will(&env, &client, &owner, &token_address);
 
-    // check_in has no minimum-interval requirement -- only that the will is
-    // Active -- so repeated calls at the same timestamp are enough to push
-    // the trail well past MAX_HISTORY_ENTRIES and force trimming.
     let total_checkins: u64 = MAX_HISTORY_ENTRIES as u64 + 20;
     for _ in 0..total_checkins {
+        env.ledger().with_mut(|l| l.timestamp += 60);
         client.check_in(&will_id, &owner);
     }
 

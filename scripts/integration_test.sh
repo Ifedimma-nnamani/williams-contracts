@@ -1,24 +1,9 @@
 #!/usr/bin/env bash
+# Integration smoke test for the will contract against a local standalone node.
 #
-# Integration test for the compiled WillContract .wasm artifact.
-#
-# Unlike `cargo test`, which runs the contract logic in-process against
-# soroban_sdk's mock `Env`, this script builds the real wasm binary, deploys
-# it to a local Soroban network, and drives a handful of core lifecycle calls
-# through `stellar contract invoke` — the same code path a real dApp uses.
-# This catches build- or host-environment-specific issues (wasm size limits,
-# host function availability, XDR encoding mismatches) that the fast unit
-# test suite cannot, since it never touches the compiled artifact or a real
-# host.
-#
-# Requirements: `stellar` CLI (>= 22.0.0), `docker` (for the local network),
-# and `jq`.
-#
-# Usage:
-#   ./scripts/integration_test.sh
-#
-# See CONTRIBUTING.md for how to run this locally and what it checks.
-
+# Exercises the full create -> check-in -> cancel lifecycle using the compiled
+# WASM bindings and the installed Stellar CLI. Requires a running standalone
+# node and a pinned Stellar CLI version.
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -111,7 +96,63 @@ stellar keys generate "$BENEFICIARY" --network "$NETWORK" --fund
 beneficiary_created=1
 BENEFICIARY_ADDR="$(stellar keys address "$BENEFICIARY")"
 
-log "create_will: locking 1000 stroops for one beneficiary, 1-day check-in / 1-day grace"
+# ---------------------------------------------------------------------------
+# Custody assertions
+#
+# The lifecycle below moves exactly DEPOSIT_AMOUNT stroops of the test token
+# from the owner into the contract on create_will, and must move exactly that
+# amount back on cancel_will. We read the token balances of both parties
+# before and after each step and assert the exact deltas, so a build with
+# broken transfers or a wrong refund amount fails the smoke test even if the
+# will still reaches the expected status.
+#
+# Negative fixture: set INTEGRATION_EXPECTED_REFUND to a deliberately wrong
+# value to verify the refund assertion actually fires, e.g.
+#
+#   INTEGRATION_EXPECTED_REFUND=999 ./scripts/integration_test.sh
+#
+# The script must then fail with a refund-mismatch error.
+# ---------------------------------------------------------------------------
+DEPOSIT_AMOUNT=1000
+EXPECTED_REFUND="${INTEGRATION_EXPECTED_REFUND:-$DEPOSIT_AMOUNT}"
+
+# token_balance <address>: prints the token balance of <address> as an integer.
+token_balance() {
+  local addr="$1"
+  local raw
+  raw="$(stellar contract invoke \
+    --id "$TOKEN_ID" \
+    --source "$IDENTITY" \
+    --network "$NETWORK" \
+    -- balance --id "$addr" 2>/dev/null | tail -n 1)"
+  # The CLI may print the integer directly or wrap it in quotes/JSON.
+  raw="${raw//\"/}"
+  raw="${raw//[[:space:]]/}"
+  if ! [[ "$raw" =~ ^[0-9]+$ ]]; then
+    echo "Could not parse token balance for $addr (got: '$raw')" >&2
+    return 1
+  fi
+  printf '%s\n' "$raw"
+}
+
+# assert_delta <label> <before> <after> <expected_delta>
+assert_delta() {
+  local label="$1" before="$2" after="$3" expected="$4"
+  local actual=$(( after - before ))
+  if [ "$actual" -ne "$expected" ]; then
+    echo "Custody assertion failed ($label): expected delta $expected, got $actual (before=$before after=$after)" >&2
+    exit 1
+  fi
+  echo "  $label: delta $actual (expected $expected) OK"
+}
+
+log "Capturing pre-deposit token balances"
+OWNER_BALANCE_BEFORE="$(token_balance "$OWNER_ADDR")"
+CONTRACT_BALANCE_BEFORE="$(token_balance "$CONTRACT_ID")"
+echo "Owner balance before: $OWNER_BALANCE_BEFORE"
+echo "Contract balance before: $CONTRACT_BALANCE_BEFORE"
+
+log "create_will: locking $DEPOSIT_AMOUNT stroops for one beneficiary, 1-day check-in / 1-day grace"
 WILL_ID="$(stellar contract invoke \
   --id "$CONTRACT_ID" \
   --source "$IDENTITY" \
@@ -128,12 +169,28 @@ WILL_ID="$(stellar contract invoke \
   --confirmation_delay_seconds 0)"
 echo "Created will id: $WILL_ID"
 
+log "Asserting deposit custody moved exactly $DEPOSIT_AMOUNT stroops into the contract"
+OWNER_BALANCE_AFTER_DEPOSIT="$(token_balance "$OWNER_ADDR")"
+CONTRACT_BALANCE_AFTER_DEPOSIT="$(token_balance "$CONTRACT_ID")"
+assert_delta "owner balance after deposit" \
+  "$OWNER_BALANCE_BEFORE" "$OWNER_BALANCE_AFTER_DEPOSIT" "-$DEPOSIT_AMOUNT"
+assert_delta "contract balance after deposit" \
+  "$CONTRACT_BALANCE_BEFORE" "$CONTRACT_BALANCE_AFTER_DEPOSIT" "$DEPOSIT_AMOUNT"
+
 log "get_will: reading back the will we just created"
-stellar contract invoke \
+WILL_AFTER_DEPOSIT="$(stellar contract invoke \
   --id "$CONTRACT_ID" \
   --source "$IDENTITY" \
   --network "$NETWORK" \
-  -- get_will --will_id "$WILL_ID"
+  -- get_will --will_id "$WILL_ID")"
+echo "$WILL_AFTER_DEPOSIT"
+
+# The will must record the deposited amount, matching the observed token delta.
+if [[ "$WILL_AFTER_DEPOSIT" != *"$DEPOSIT_AMOUNT"* ]]; then
+  echo "Will balance after deposit does not record $DEPOSIT_AMOUNT: $WILL_AFTER_DEPOSIT" >&2
+  exit 1
+fi
+echo "  will balance after deposit agrees with token delta OK"
 
 log "get_will_status: expect Active"
 STATUS="$(stellar contract invoke \
@@ -161,6 +218,36 @@ stellar contract invoke \
   --network "$NETWORK" \
   -- cancel_will --will_id "$WILL_ID" --owner "$OWNER_ADDR"
 
+log "Asserting refund custody returned exactly $EXPECTED_REFUND stroops to the owner"
+OWNER_BALANCE_AFTER_REFUND="$(token_balance "$OWNER_ADDR")"
+CONTRACT_BALANCE_AFTER_REFUND="$(token_balance "$CONTRACT_ID")"
+assert_delta "owner balance after refund" \
+  "$OWNER_BALANCE_AFTER_DEPOSIT" "$OWNER_BALANCE_AFTER_REFUND" "$EXPECTED_REFUND"
+assert_delta "contract balance after refund" \
+  "$CONTRACT_BALANCE_AFTER_DEPOSIT" "$CONTRACT_BALANCE_AFTER_REFUND" "-$EXPECTED_REFUND"
+
+# The contract must be back to its pre-deposit balance (no stranded funds).
+if [ "$CONTRACT_BALANCE_AFTER_REFUND" -ne "$CONTRACT_BALANCE_BEFORE" ]; then
+  echo "Contract balance after refund ($CONTRACT_BALANCE_AFTER_REFUND) does not match pre-deposit balance ($CONTRACT_BALANCE_BEFORE)" >&2
+  exit 1
+fi
+echo "  contract balance restored to pre-deposit value OK"
+
+log "get_will: reading back the will after cancellation"
+WILL_AFTER_CANCEL="$(stellar contract invoke \
+  --id "$CONTRACT_ID" \
+  --source "$IDENTITY" \
+  --network "$NETWORK" \
+  -- get_will --will_id "$WILL_ID")"
+echo "$WILL_AFTER_CANCEL"
+
+# The will must no longer record the deposited balance after the refund.
+if [[ "$WILL_AFTER_CANCEL" == *"$DEPOSIT_AMOUNT"* ]]; then
+  echo "Will balance after cancel still records $DEPOSIT_AMOUNT: $WILL_AFTER_CANCEL" >&2
+  exit 1
+fi
+echo "  will balance after cancel agrees with token delta OK"
+
 log "get_will_status: expect Cancelled"
 FINAL_STATUS="$(stellar contract invoke \
   --id "$CONTRACT_ID" \
@@ -174,3 +261,4 @@ if [[ "$FINAL_STATUS" != *"Cancelled"* ]]; then
 fi
 
 log "All lifecycle invocations against the real wasm artifact succeeded."
+log "Custody verified: $DEPOSIT_AMOUNT stroops deposited and $EXPECTED_REFUND stroops refunded."

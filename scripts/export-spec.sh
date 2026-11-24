@@ -1,7 +1,5 @@
 #!/usr/bin/env bash
-# Builds the release wasm and exports the contract's embedded spec
-# (function signatures, Will/Beneficiary/Guardian/WillStatus/WillError
-# types) as a versioned JSON file under spec/.
+# Export the compiled `will` contract spec to spec/will-v<version>.json.
 #
 # Usage:
 #   scripts/export-spec.sh                        write spec/will-v<version>.json
@@ -23,7 +21,6 @@
 # snapshot. It exits non-zero when they differ, or when no snapshot exists for
 # the crate version currently declared — the case where a public signature
 # changed and the version was bumped but the export step was skipped.
-=======
 #
 # Requires: cargo, the wasm32v1-none target, stellar-cli >= 22.0.0 (`cargo install
 # --locked stellar-cli`), and jq.
@@ -31,8 +28,8 @@
 # STELLAR_BIN overrides the exporter binary (used by the tests).
 set -euo pipefail
 
-repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-cd "$repo_root"
+ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+cd "$ROOT_DIR"
 
 usage() {
   echo "Usage: scripts/export-spec.sh [--check | --update-unreleased]" >&2
@@ -54,19 +51,37 @@ else
   exit 2
 fi
 
-if command -v cargo >/dev/null 2>&1; then
-  version="$(cargo metadata --no-deps --format-version 1 \
-    | jq -r '.packages[] | select(.name=="will") | .version')"
-else
-  version="$(sed -nE 's/^version[[:space:]]*=[[:space:]]*"([^"]+)".*/\1/p' contracts/will/Cargo.toml | head -n 1)"
+STELLAR_BIN="${STELLAR_BIN:-stellar}"
+WASM_PATH="target/wasm32v1-none/release/will.wasm"
+
+crate_version() {
+  cargo metadata --no-deps --format-version 1 \
+    | jq -r '.packages[] | select(.name=="will") | .version'
+}
+
+# Export the embedded SCSpecEntry stream from the compiled wasm as JSON.
+# Writes to $1. Propagates any exporter failure to the caller.
+export_spec() {
+  local out="$1"
+  "$STELLAR_BIN" contract bindings json \
+    --wasm "$WASM_PATH" \
+    --output "$out"
+}
+
+echo "Building will contract (canonical locked release build)..."
+"${ROOT_DIR}/scripts/build-wasm.sh" will
+
+if [[ ! -f "$WASM_PATH" ]]; then
+  echo "error: expected wasm artifact not found at $WASM_PATH" >&2
+  exit 1
 fi
 
-wasm_path="target/wasm32v1-none/release/will.wasm"
+version="$(crate_version)"
+if [[ -z "$version" || "$version" == "null" ]]; then
+  echo "error: could not determine will crate version" >&2
+  exit 1
+fi
 out_path="spec/will-v${version}.json"
-stellar_bin="${STELLAR_BIN:-stellar}"
-
-echo "Building will contract (release, wasm32v1-none)..."
-SOROBAN_SDK_BUILD_SYSTEM_SUPPORTS_SPEC_SHAKING_V2=1 cargo build -p will --release --target wasm32v1-none
 
 if [[ "${check_mode}" -eq 0 ]]; then
   if [[ -e "${out_path}" && "${update_mode}" -eq 0 ]]; then
@@ -89,38 +104,28 @@ if [[ "${check_mode}" -eq 0 ]]; then
   exit 0
 fi
 
-# ── --check ──────────────────────────────────────────────────────────────────
+mkdir -p spec
+tmp_file="$(mktemp "spec/.will-v${version}.XXXXXX.json")"
+# shellcheck disable=SC2064
+trap "rm -f '$tmp_file'" EXIT
 
-if [[ ! -f "${out_path}" ]]; then
-  echo "ERROR: ${out_path} does not exist." >&2
-  echo "contracts/will/Cargo.toml declares version ${version}, so a spec snapshot" >&2
-  echo "must be committed for it. Run scripts/export-spec.sh and commit the result." >&2
+echo "Exporting spec to $out_path..."
+if ! export_spec "$tmp_file"; then
+  echo "error: spec export failed; snapshot left untouched" >&2
   exit 1
 fi
 
-tmp_dir="$(mktemp -d)"
-trap 'rm -rf "${tmp_dir}"' EXIT
-fresh_path="${tmp_dir}/will-v${version}.json"
-
-echo "Exporting current spec for comparison..."
-export_spec "${fresh_path}"
-
-# Compare parsed JSON rather than bytes, so formatting or key ordering from a
-# different stellar-cli build is not reported as a contract change.
-jq -S . "${out_path}" > "${tmp_dir}/committed.norm"
-jq -S . "${fresh_path}" > "${tmp_dir}/fresh.norm"
-
-if diff -q "${tmp_dir}/committed.norm" "${tmp_dir}/fresh.norm" >/dev/null; then
-  echo "OK: ${out_path} matches the compiled contract."
-  exit 0
+if [[ ! -s "$tmp_file" ]]; then
+  echo "error: exporter produced no output; snapshot left untouched" >&2
+  exit 1
 fi
 
-echo "ERROR: ${out_path} does not match the compiled contract." >&2
-echo "The public interface changed without a matching spec export." >&2
-echo >&2
-diff -u "${tmp_dir}/committed.norm" "${tmp_dir}/fresh.norm" >&2 || true
-echo >&2
-echo "Fix: if this is a public interface change, bump the version in" >&2
-echo "contracts/will/Cargo.toml, run scripts/export-spec.sh, and commit the" >&2
-echo "new file. Previously published spec files are never edited." >&2
-exit 1
+if [[ ! -f "$out_path" ]]; then
+  echo "error: missing spec snapshot $out_path" >&2
+  exit 1
+fi
+if ! diff -u "$out_path" "$tmp_file"; then
+  echo "error: $out_path is stale; run scripts/export-spec.sh" >&2
+  exit 1
+fi
+echo "Spec snapshot $out_path is up to date."

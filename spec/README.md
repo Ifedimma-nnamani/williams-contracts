@@ -18,7 +18,11 @@ file to detect spec drift before it ships.
   enforces this: it refuses to write over an existing snapshot unless the
   explicit update mode described below is requested.
 - `will-v0.1.0.json` — initial baseline specification snapshot.
-- `will-v1.3.0.json` — current specification snapshot synchronized to crate
+- `will-v1.4.0.json` — adds `get_will_history_page_v2` with an exclusive
+  `Option<u64>` cursor. To continue paging, pass the last returned
+  transition's `seq` directly to v2. The existing u32 endpoint is still
+  available for legacy clients.
+- `will-v1.3.0.json` — specification snapshot synchronized to crate
   version `1.3.0`, adding:
   - **Multi-token & mixed-allocation create/update signatures:** `create_will`
     (`tokens: Vec<(Address, i128)>`, `guardian_threshold: u32`,

@@ -1,0 +1,58 @@
+# Dependabot configuration for reviewed dependency update proposals.
+#
+# Scope (see issue #299):
+#   - Root Rust workspace (Cargo.toml `members = ["contracts/will"]`)
+#   - Independent fuzz crate (fuzz/Cargo.toml declares its own `[workspace]`)
+#   - GitHub Actions used by workflows under .github/workflows
+#
+# Review expectations:
+#   - Every proposal is a normal pull request and MUST be reviewed by a maintainer.
+#   - No auto-merge, release or deployment is enabled here; Dependabot only opens PRs.
+#   - Run the standard CI gates (fmt, clippy, tests, audit, workflow lint) on each PR.
+#   - Action updates must preserve immutable pinning (ISSUE-117): review the
+#     resolved commit SHA before merging.
+#   - Financial-contract logic changes are never auto-merged; treat any Cargo
+#     update touching contracts/will as requiring full manual review.
+version: 2
+updates:
+  # Root Rust workspace dependencies.
+  - package-ecosystem: "cargo"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    open-pull-requests-limit: 5
+    groups:
+      cargo-minor-patch:
+        patterns:
+          - "*"
+        update-types:
+          - "minor"
+          - "patch"
+
+  # Independent fuzz crate (separate workspace root).
+  - package-ecosystem: "cargo"
+    directory: "/fuzz"
+    schedule:
+      interval: "weekly"
+    open-pull-requests-limit: 3
+    groups:
+      fuzz-minor-patch:
+        patterns:
+          - "*"
+        update-types:
+          - "minor"
+          - "patch"
+
+  # Workflow action revisions.
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    open-pull-requests-limit: 5
+    groups:
+      actions-minor-patch:
+        patterns:
+          - "*"
+        update-types:
+          - "minor"
+          - "patch"

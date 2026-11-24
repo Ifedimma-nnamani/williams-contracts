@@ -23,7 +23,7 @@ use soroban_sdk::{
 use crate::storage::MAX_HISTORY_ENTRIES;
 use crate::{
     types::WillStatusTransition, Allocation, Beneficiary, WillContract, WillContractClient,
-    WillStatus,
+    WillStatus, MIN_CHECKIN_INTERVAL,
 };
 
 const DAY: u64 = 86_400;
@@ -78,7 +78,9 @@ fn create_will(
 /// three entries on top of the single `create` transition (#500).
 fn cycle(env: &Env, client: &WillContractClient<'_>, owner: &Address, will_id: u64, rounds: u32) {
     for _ in 0..rounds {
-        // check_in resets the deadline so the next trigger is due.
+        // Let check_in pass the rate limit and record a transition.
+        env.ledger()
+            .with_mut(|ledger| ledger.timestamp += MIN_CHECKIN_INTERVAL);
         client.check_in(&will_id, owner);
         advance(env, 91);
         client.trigger_will(&will_id);
@@ -227,9 +229,9 @@ fn history_pages_walk_the_whole_trail_without_gaps_or_duplicates() {
     // received; entries with seq strictly greater than that are returned next.
     const PAGE: u32 = 4;
     let mut walked: Vec<WillStatusTransition> = Vec::new(&env);
-    let mut cursor: Option<u32> = None;
+    let mut cursor: Option<u64> = None;
     loop {
-        let page = client.get_will_history_page(&will_id, &cursor, &PAGE);
+        let page = client.get_will_history_page_v2(&will_id, &cursor, &PAGE);
         if page.is_empty() {
             break;
         }
@@ -284,4 +286,54 @@ fn history_size_stays_within_bounds_across_many_transitions() {
     let history = client.get_will_history(&will_id);
     let last = history.get(history.len() - 1).unwrap();
     assert_eq!(last.action, symbol_short!("emerg"));
+}
+
+#[test]
+fn history_v2_continues_across_u32_max_and_trimming() {
+    use crate::storage::{self, DataKey};
+
+    let (env, client, owner, _) = setup();
+    let will_id = 42;
+    let boundary = u64::from(u32::MAX);
+    let transition = WillStatusTransition {
+        will_id,
+        from_status: WillStatus::Active,
+        to_status: WillStatus::Active,
+        timestamp: env.ledger().timestamp(),
+        actor: owner,
+        action: symbol_short!("checkin"),
+        seq: 0,
+    };
+    let append = |count| {
+        env.as_contract(&client.address, || {
+            for _ in 0..count {
+                storage::append_history(&env, will_id, &transition);
+            }
+        });
+    };
+    env.as_contract(&client.address, || {
+        env.storage()
+            .persistent()
+            .set(&DataKey::WillHistorySeq(will_id), &(boundary - 2));
+    });
+    append(MAX_HISTORY_ENTRIES);
+
+    let first = client.get_will_history_page_v2(&will_id, &None, &2);
+    assert_eq!(
+        first,
+        client.get_will_history_page_v2(&will_id, &Some(0), &2)
+    );
+    assert_eq!(first, client.get_will_history_page(&will_id, &Some(1), &2));
+    assert_eq!(first.get(0).unwrap().seq, boundary - 1);
+    let cursor = first.last().unwrap().seq;
+    assert_eq!(cursor, boundary);
+
+    append(2);
+    let second = client.get_will_history_page_v2(&will_id, &Some(cursor), &2);
+    assert_eq!(second.get(0).unwrap().seq, boundary + 1);
+    assert_eq!(second.last().unwrap().seq, boundary + 2);
+
+    let third = client.get_will_history_page_v2(&will_id, &Some(second.last().unwrap().seq), &2);
+    assert_eq!(third.get(0).unwrap().seq, boundary + 3);
+    assert_eq!(third.last().unwrap().seq, boundary + 4);
 }

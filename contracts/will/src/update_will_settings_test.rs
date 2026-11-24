@@ -471,6 +471,194 @@ fn update_will_settings_guardian_change_clears_cancel_vote_state() {
     assert_eq!(after_new_vote.guardian_cancel_vote_weight, 1);
 }
 
+// ── Regression: all-None update_will_settings is a no-op ──
+
+/// Count `will_settings_updated` events emitted for the given will id.
+fn count_settings_updated_events(env: &Env, will_id: u64) -> u32 {
+    let all_events = env.events().all();
+    let events = all_events.events();
+    let mut count = 0u32;
+    for event in events.iter() {
+        let soroban_sdk::xdr::ContractEventBody::V0(v0) = &event.body;
+        if v0.topics.len() < 2 {
+            continue;
+        }
+        let topic0: Result<soroban_sdk::Symbol, _> = v0.topics[0].clone().try_into_val(env);
+        if topic0 != Ok(symbol_short!("setupd")) {
+            continue;
+        }
+        let topic1_val: soroban_sdk::Val = match v0.topics[1].clone().try_into_val(env) {
+            Ok(v) => v,
+            Err(_) => continue,
+        };
+        let topic1: Result<u64, _> = topic1_val.try_into_val(env);
+        if topic1 == Ok(will_id) {
+            count += 1;
+        }
+    }
+    count
+}
+
+/// Extract the `updated_fields` vector from the most recent `setupd` event
+/// for the given will id.
+fn last_settings_updated_fields(env: &Env, will_id: u64) -> SorobanVec<soroban_sdk::Symbol> {
+    let all_events = env.events().all();
+    let events = all_events.events();
+    let mut found: Option<SorobanVec<soroban_sdk::Symbol>> = None;
+    for event in events.iter() {
+        let soroban_sdk::xdr::ContractEventBody::V0(v0) = &event.body;
+        if v0.topics.len() < 2 {
+            continue;
+        }
+        let topic0: Result<soroban_sdk::Symbol, _> = v0.topics[0].clone().try_into_val(env);
+        if topic0 != Ok(symbol_short!("setupd")) {
+            continue;
+        }
+        let topic1_val: soroban_sdk::Val = match v0.topics[1].clone().try_into_val(env) {
+            Ok(v) => v,
+            Err(_) => continue,
+        };
+        let topic1: Result<u64, _> = topic1_val.try_into_val(env);
+        if topic1 != Ok(will_id) {
+            continue;
+        }
+        let data_val: soroban_sdk::Val = v0.data.clone().try_into_val(env).unwrap();
+        let data: (Address, SorobanVec<soroban_sdk::Symbol>) =
+            data_val.try_into_val(env).unwrap();
+        found = Some(data.1);
+    }
+    found.expect("setupd event must be emitted")
+}
+
+#[test]
+fn test_update_will_settings_all_none_is_noop() {
+    let (env, client, owner, token_address) = setup();
+
+    let will_id = create_active_will(&env, &client, &owner, &token_address);
+
+    let before = client.get_will(&will_id);
+    let events_before = count_settings_updated_events(&env, will_id);
+
+    // All-None request: must not rewrite the will nor emit an update event.
+    client.update_will_settings(&will_id, &owner, &None, &None, &None, &None);
+
+    let after = client.get_will(&will_id);
+    assert_eq!(after.beneficiaries.len(), before.beneficiaries.len());
+    assert_eq!(after.guardians.len(), before.guardians.len());
+    assert_eq!(after.checkin_period_days, before.checkin_period_days);
+    assert_eq!(after.grace_period_days, before.grace_period_days);
+    assert_eq!(after.last_checkin, before.last_checkin);
+    assert_eq!(after.status, before.status);
+
+    assert_eq!(
+        count_settings_updated_events(&env, will_id),
+        events_before,
+        "all-None update must not emit will_settings_updated"
+    );
+}
+
+#[test]
+fn test_update_will_settings_all_none_unauthorized_rejected() {
+    let (env, client, owner, token_address) = setup();
+
+    let will_id = create_active_will(&env, &client, &owner, &token_address);
+
+    // Drop the blanket auth mock so the unauthorized caller is actually
+    // rejected rather than silently accepted.
+    env.set_auths(&[]);
+    let intruder = Address::generate(&env);
+    let result = client.try_update_will_settings(&will_id, &intruder, &None, &None, &None, &None);
+    assert!(
+        result.is_err(),
+        "unauthorized all-None update must be rejected"
+    );
+}
+
+#[test]
+fn test_update_will_settings_single_field_saves_and_emits() {
+    let (env, client, owner, token_address) = setup();
+
+    let will_id = create_active_will(&env, &client, &owner, &token_address);
+
+    let before = client.get_will(&will_id);
+    let events_before = count_settings_updated_events(&env, will_id);
+
+    let new_checkin = before.checkin_period_days + 3;
+    client.update_will_settings(&will_id, &owner, &None, &None, &Some(new_checkin), &None);
+
+    let after = client.get_will(&will_id);
+    assert_eq!(after.checkin_period_days, new_checkin);
+    assert_eq!(after.grace_period_days, before.grace_period_days);
+    assert_eq!(after.beneficiaries.len(), before.beneficiaries.len());
+    assert_eq!(after.guardians.len(), before.guardians.len());
+
+    assert_eq!(
+        count_settings_updated_events(&env, will_id),
+        events_before + 1,
+        "single-field update must emit exactly one will_settings_updated"
+    );
+    let fields = last_settings_updated_fields(&env, will_id);
+    assert_eq!(fields.len(), 1);
+    assert_eq!(fields.get(0).unwrap(), symbol_short!("checkin"));
+}
+
+// ── Native XLM asset-contract semantics ──
+
+/// Native XLM is represented by its Stellar asset contract address and is
+/// transferred through `token::Client` like any other token. The persisted
+/// `is_native` field is a legacy/reserved compatibility flag: it is always
+/// `false` on creation and no `env.transfer` branch is ever taken.
+#[test]
+fn test_native_asset_contract_payment_uses_token_client() {
+    let env = Env::default();
+    env.mock_all_auths();
+    env.ledger().set_timestamp(1_700_000_000);
+
+    let owner = Address::generate(&env);
+    // Native XLM SAC: the asset contract that represents native XLM.
+    let native_sac = env.register_stellar_asset_contract_v2(owner.clone());
+    let native_address = native_sac.address();
+    StellarAssetClient::new(&env, &native_address).mint(&owner, &1_000_000);
+
+    let contract_id = env.register(WillContract, ());
+    let client = WillContractClient::new(&env, &contract_id);
+
+    let beneficiary = Address::generate(&env);
+    let will_id = client.create_will(
+        &owner,
+        &vec![&env, (native_address.clone(), 1_000_000_i128)],
+        &vec![
+            &env,
+            Beneficiary {
+                address: beneficiary.clone(),
+                allocation: Allocation::Percentage(10_000),
+            },
+        ],
+        &30,
+        &7,
+        &vec![&env],
+        &1,
+        &None,
+        &0,
+    );
+
+    // The persisted flag stays false even for the native asset contract.
+    let will = client.get_will(&will_id);
+    assert!(
+        !will.is_native,
+        "is_native is a legacy/reserved field and must remain false"
+    );
+
+    // Exercise the payment path: trigger and release through token::Client.
+    env.ledger().with_mut(|l| l.timestamp += 31 * DAY);
+    client.trigger_will(&will_id);
+    client.release(&will_id, &owner);
+
+    let token_client = soroban_sdk::token::Client::new(&env, &native_address);
+    assert_eq!(token_client.balance(&beneficiary), 1_000_000);
+    assert_eq!(token_client.balance(&contract_id), 0);
+}
+
 #[test]
 fn test_update_periods_emits_valid_future_deadline_event() {
     let (env, client, owner, token_address) = setup();

@@ -239,3 +239,114 @@ fn cancel_is_accepted_at_the_grace_deadline_boundary() {
     assert_eq!(will.status, WillStatus::Active);
     assert_eq!(will.trigger_time, None);
 }
+
+/// Issue #214: with no cancel vote cast, the cancellation vote query reports
+/// an empty record for every guardian and a zero live tally.
+#[test]
+fn cancel_vote_status_reports_no_vote() {
+    let (env, contract_id, guardian_a, guardian_b, will_id) = setup_triggered(90);
+    let client = WillContractClient::new(&env, &contract_id);
+
+    assert_eq!(client.get_guardian_cancel_vote_status(&will_id, &guardian_a), None);
+    assert_eq!(client.get_guardian_cancel_vote_status(&will_id, &guardian_b), None);
+
+    let status = client.get_guardian_cancel_votes(&will_id);
+    assert_eq!(status.vote_count, 0);
+    assert_eq!(status.vote_weight, 0);
+    assert_eq!(status.threshold, 2);
+    assert_eq!(status.quorum_reached, false);
+}
+
+/// Issue #214: a live cancel vote is reported with its timestamp and counted
+/// towards the live tally, and is kept distinct from trigger votes.
+#[test]
+fn cancel_vote_status_reports_live_vote() {
+    let (env, contract_id, guardian_a, guardian_b, will_id) = setup_triggered(90);
+    let client = WillContractClient::new(&env, &contract_id);
+
+    // A trigger vote from the same guardian must not leak into the cancel
+    // namespace.
+    client.guardian_trigger(&will_id, &guardian_a, &GuardianVoteReason::Unreachable);
+    assert_eq!(client.get_guardian_cancel_vote_status(&will_id, &guardian_a), None);
+
+    let voted_at = env.ledger().timestamp();
+    client.guardian_cancel_trigger(&will_id, &guardian_a);
+
+    assert_eq!(
+        client.get_guardian_cancel_vote_status(&will_id, &guardian_a),
+        Some(voted_at),
+    );
+    assert_eq!(client.get_guardian_cancel_vote_status(&will_id, &guardian_b), None);
+
+    let status = client.get_guardian_cancel_votes(&will_id);
+    assert_eq!(status.vote_count, 1);
+    assert_eq!(status.vote_weight, 1);
+    assert_eq!(status.threshold, 2);
+    assert_eq!(status.quorum_reached, false);
+
+    // The trigger vote record is untouched by the cancel vote.
+    assert_eq!(client.get_will(&will_id).guardian_votes, 1);
+}
+
+/// Issue #214: a cancel vote expires exactly at the vote window boundary, so
+/// the query must stop counting it at that instant (matching quorum rules).
+#[test]
+fn cancel_vote_status_expires_at_exact_boundary() {
+    let (env, contract_id, guardian_a, _guardian_b, will_id) = setup_triggered(90);
+    let client = WillContractClient::new(&env, &contract_id);
+
+    let voted_at = env.ledger().timestamp();
+    client.guardian_cancel_trigger(&will_id, &guardian_a);
+    assert_eq!(
+        client.get_guardian_cancel_vote_status(&will_id, &guardian_a),
+        Some(voted_at),
+    );
+
+    // One second before expiry the vote is still live.
+    env.ledger().with_mut(|l| l.timestamp = voted_at + 7 * DAY - 1);
+    assert_eq!(
+        client.get_guardian_cancel_vote_status(&will_id, &guardian_a),
+        Some(voted_at),
+    );
+    assert_eq!(client.get_guardian_cancel_votes(&will_id).vote_weight, 1);
+
+    // Exactly at the expiry instant the vote is no longer live.
+    env.ledger().with_mut(|l| l.timestamp = voted_at + 7 * DAY);
+    assert_eq!(client.get_guardian_cancel_vote_status(&will_id, &guardian_a), None);
+    let status = client.get_guardian_cancel_votes(&will_id);
+    assert_eq!(status.vote_count, 0);
+    assert_eq!(status.vote_weight, 0);
+}
+
+/// Issue #214: a non-guardian cannot inspect per-guardian cancel vote records.
+#[test]
+fn cancel_vote_status_rejects_non_guardian() {
+    let (env, contract_id, _guardian_a, _guardian_b, will_id) = setup_triggered(90);
+    let client = WillContractClient::new(&env, &contract_id);
+
+    let stranger = Address::generate(&env);
+    assert_eq!(
+        client.try_get_guardian_cancel_vote_status(&will_id, &stranger),
+        Err(Ok(WillError::NotGuardian.into())),
+    );
+}
+
+/// Issue #214: a successful cancellation resets the cancel vote records, so
+/// the query reports no votes afterwards.
+#[test]
+fn cancel_vote_status_resets_after_successful_cancel() {
+    let (env, contract_id, guardian_a, guardian_b, will_id) = setup_triggered(90);
+    let client = WillContractClient::new(&env, &contract_id);
+
+    client.guardian_cancel_trigger(&will_id, &guardian_a);
+    client.guardian_cancel_trigger(&will_id, &guardian_b);
+    assert_eq!(client.get_will(&will_id).status, WillStatus::Active);
+
+    assert_eq!(client.get_guardian_cancel_vote_status(&will_id, &guardian_a), None);
+    assert_eq!(client.get_guardian_cancel_vote_status(&will_id, &guardian_b), None);
+
+    let status = client.get_guardian_cancel_votes(&will_id);
+    assert_eq!(status.vote_count, 0);
+    assert_eq!(status.vote_weight, 0);
+    assert_eq!(status.quorum_reached, false);
+}
