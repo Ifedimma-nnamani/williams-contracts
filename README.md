@@ -4,8 +4,8 @@
 
 **Trustless on-chain inheritance on Stellar Soroban**
 
-[![Rust](https://img.shields.io/badge/Rust-1.84%2B-orange?logo=rust)](https://www.rust-lang.org/)
-[![Soroban SDK](https://img.shields.io/badge/Soroban%20SDK-22.0.0-7D00FF)](https://developers.stellar.org/docs/build/smart-contracts)
+[![Rust](https://img.shields.io/badge/Rust-1.84%2B%20(tested%20toolchain)-orange?logo=rust)](https://www.rust-lang.org/)
+[![Soroban SDK](https://img.shields.io/badge/Soroban%20SDK-28.0.0-7D00FF)](https://developers.stellar.org/docs/build/smart-contracts)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](./LICENSE)
 [![Security Policy](https://img.shields.io/badge/Security-Policy-blue.svg)](./SECURITY.md)
 [![Stellar Testnet](https://img.shields.io/badge/Stellar-Testnet-08b5e5?logo=stellar)](https://developers.stellar.org/docs/networks)
@@ -37,8 +37,8 @@ Williams requires standard **SEP-41 compliant tokens** without transfer fees (`b
 
 ## Tech Stack
 
-- **Rust** 1.84+
-- **soroban-sdk** 22.0.0
+- **Rust** 1.84+ — this is the toolchain version CI tests against; older compilers are not verified
+- **soroban-sdk** 28.0.0 (pinned in the workspace `Cargo.toml`)
 - **stellar-cli** for building and deploying to Soroban networks
 
 ## Local Setup
@@ -50,11 +50,11 @@ curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
 # Add the Soroban wasm target
 rustup target add wasm32v1-none
 
-# Install the Stellar CLI (>= 22.0.0)
+# Install the Stellar CLI (a recent release compatible with soroban-sdk 28)
 cargo install --locked stellar-cli
 
 # Clone and test
-git clone https://github.com/Williams/williams-contracts.git
+git clone https://github.com/willi-d7/williams-contracts.git
 cd williams-contracts
 cargo test
 cargo clippy --all-targets -- -D warnings
@@ -91,14 +91,25 @@ them. The release build profile is separately tuned for `.wasm` binary size
 
 ## Testing and fuzzing
 
-`cargo test` runs the hand-written suite in `contracts/will/src/test.rs`
-alongside a property-based fuzzing suite that drives `create_will` and
-`update_beneficiaries` with malformed and edge-case input, checking that the
-contract never aborts and that an accepted will always satisfies its
-documented invariants.
+`cargo test` runs the unit and regression suites registered as modules in
+`contracts/will/src/lib.rs` — the property-based `fuzz_test` module, the
+`allocation_test` module, and the per-issue regression modules — alongside a
+`proptest` suite that drives `create_will` and `update_beneficiaries` with
+malformed and edge-case input, checking that the contract never aborts and that
+an accepted will always satisfies its documented invariants.
 
 For deeper, coverage-guided fuzzing there are `cargo-fuzz` targets under
-[`fuzz/`](./fuzz):
+[`fuzz/`](./fuzz). `fuzz/Cargo.toml` registers seven `[[bin]]` targets:
+
+| Target | Status |
+|---|---|
+| `create_will` | Working |
+| `update_beneficiaries` | Working |
+| `merge_wills` | Working |
+| `split_will` | Working |
+| `multi_token_distribution` | Working |
+| `release_inheritance` | Present but broken — not validated coverage |
+| `reveal_and_claim` | Present but broken — not validated coverage |
 
 ```bash
 cargo install cargo-fuzz
@@ -112,19 +123,27 @@ how to reproduce and minimise a crash, and how to add a target.
 
 The following limits are defined as `pub const` in `lib.rs` and re-exported from the crate root. They are the canonical source of truth — off-chain tooling, test harnesses, and SDK integrations should import them directly rather than hardcoding duplicates that can silently drift out of sync.
 
+### Public constants
+
+These are exported and safe to import from the crate root.
+
 | Constant | Value | Meaning |
 |---|---|---|
 | `MAX_BENEFICIARIES` | `10` | Maximum number of beneficiaries per will — see [the FAQ](#faq-why-is-there-a-beneficiary-limit) |
-| `MAX_GUARDIANS` | `3` | Maximum number of guardians per will |
-| `GUARDIAN_THRESHOLD` | `2` | Default number of guardian votes required to force an early release |
-| `MAX_BENEFICIARIES` | `10` | Maximum number of beneficiaries per will |
-| `MAX_GUARDIAN_WEIGHT` | `1000000` | Maximum vote weight a single guardian may be given via `update_guardians_weighted`. A weight of `0` is normalised to `1` |
-| `MAX_GUARDIANS` | `3` | Maximum number of guardians per will (private to the crate, not exported) |
-| `GUARDIAN_THRESHOLD` | `2` | Default number of guardian votes required to force an early release (private to the crate, not exported) |
+| `MAX_GUARDIAN_WEIGHT` | `1000000` | Maximum vote weight a single guardian may be given via `update_guardians_weighted`. A weight of `0` is rejected with `InvalidGuardianThreshold` (code `20`), not normalised |
 
 ```rust
 use will::MAX_BENEFICIARIES;
 ```
+
+### Internal limits
+
+These are private to the crate and are **not** importable. They are listed here for reference only; do not depend on them from off-chain code.
+
+| Constant | Value | Meaning |
+|---|---|---|
+| `MAX_GUARDIANS` | `3` | Maximum number of guardians per will (private to the crate, not exported) |
+| `GUARDIAN_THRESHOLD` | `2` | Default number of guardian votes required to force an early release (private to the crate, not exported) |
 
 > **Beneficiary limit:** a will can name at most **10 beneficiaries**.
 > `create_will`, `batch_create_wills`, `update_beneficiaries` and
