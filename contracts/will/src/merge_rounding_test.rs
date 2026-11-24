@@ -138,6 +138,77 @@ fn merge_beneficiaries_preserves_small_share() {
     );
 }
 
+/// Issue #209: promoting tiny positive shares to 1 bp can push the merged
+/// total above 10,000. The correction must be spread across entries with
+/// headroom, and the merge must still conserve the whole balance.
+#[test]
+fn merge_beneficiaries_keeps_total_within_10000_bps() {
+    let (env, client, owner, token, token_address) = setup();
+    let large = Address::generate(&env);
+
+    let a = client.create_will(
+        &owner,
+        &vec![&env, (token_address.clone(), 1_000_000_000_000_i128)],
+        &vec![
+            &env,
+            Beneficiary {
+                address: large.clone(),
+                allocation: Allocation::Percentage(10_000),
+            },
+        ],
+        &90,
+        &7,
+        &vec![&env],
+        &0,
+        &None,
+        &0,
+    );
+
+    let mut b_beneficiaries: SorobanVec<Beneficiary> = SorobanVec::new(&env);
+    let mut b_addresses: SorobanVec<Address> = SorobanVec::new(&env);
+    for i in 0..9 {
+        let addr = Address::generate(&env);
+        b_addresses.push_back(addr.clone());
+        let bp = if i == 8 { 1_112 } else { 1_111 };
+        b_beneficiaries.push_back(Beneficiary {
+            address: addr,
+            allocation: Allocation::Percentage(bp),
+        });
+    }
+    let b = client.create_will(
+        &owner,
+        &vec![&env, (token_address, 90_000_i128)],
+        &b_beneficiaries,
+        &90,
+        &7,
+        &vec![&env],
+        &0,
+        &None,
+        &0,
+    );
+
+    client.merge_wills(&owner, &a, &b);
+
+    let merged = client.get_will(&a);
+    let total_bps: u32 = merged
+        .beneficiaries
+        .iter()
+        .map(|b| match b.allocation {
+            Allocation::Percentage(bp) => bp,
+            Allocation::FixedAmount(_) => 0,
+        })
+        .sum();
+    assert_eq!(total_bps, 10_000, "merged percentages must total exactly 10000");
+
+    release(&env, &client, a);
+    let distributed: i128 = merged
+        .beneficiaries
+        .iter()
+        .map(|b| token.balance(&b.address))
+        .sum();
+    assert_eq!(distributed, 1_000_000_090_000);
+}
+
 /// Regression test: multiple beneficiaries with very small shares that would
 /// all round to 0 bp should not be silently dropped.
 #[test]

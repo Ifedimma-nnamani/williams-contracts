@@ -250,3 +250,75 @@ fn migrate_portfolio_empty_source_is_no_op() {
         "new_owner should have no wills after migrating an empty portfolio"
     );
 }
+
+// ── issue #207: lifecycle writes after migration ──────────────────────────────
+
+/// After A→B migration, lifecycle operations invoked with the unchanged
+/// authorization owner (A) must update B's discovery indexes, not recreate
+/// stale entries under A.
+#[test]
+fn migrated_discovery_reflects_later_cancel() {
+    let (env, contract_id, token) = setup();
+    let client = WillContractClient::new(&env, &contract_id);
+    let old_owner = Address::generate(&env);
+    let new_owner = Address::generate(&env);
+
+    let id = create_one_will(&env, &client, &old_owner, &token);
+    client.confirm_will(&id, &old_owner);
+    client.migrate_owner_portfolio(&old_owner, &new_owner);
+
+    assert_eq!(
+        client
+            .get_wills_by_owner_and_status(&new_owner, &WillStatus::Active, &None, &100)
+            .len(),
+        1
+    );
+
+    // Authorization owner is still A.
+    client.cancel_will(&id, &old_owner);
+
+    assert!(
+        client
+            .get_wills_by_owner_and_status(&new_owner, &WillStatus::Active, &None, &100)
+            .is_empty(),
+        "destination must no longer list the cancelled will as Active"
+    );
+    assert_eq!(
+        client
+            .get_wills_by_owner_and_status(&new_owner, &WillStatus::Cancelled, &None, &100)
+            .len(),
+        1,
+        "destination must list the will under its new status"
+    );
+    assert_eq!(client.get_will(&id).owner, old_owner);
+}
+
+/// Repeated migrations (A→B→C) keep the destination coherent: a cancel after
+/// the second migration still updates C's indexes via the alias chain.
+#[test]
+fn migrated_discovery_supports_repeated_migration() {
+    let (env, contract_id, token) = setup();
+    let client = WillContractClient::new(&env, &contract_id);
+    let a = Address::generate(&env);
+    let b = Address::generate(&env);
+    let c = Address::generate(&env);
+
+    let id = create_one_will(&env, &client, &a, &token);
+    client.confirm_will(&id, &a);
+    client.migrate_owner_portfolio(&a, &b);
+    client.migrate_owner_portfolio(&b, &c);
+    client.cancel_will(&id, &a);
+
+    assert!(
+        client
+            .get_wills_by_owner_and_status(&c, &WillStatus::Active, &None, &100)
+            .is_empty()
+    );
+    assert_eq!(
+        client
+            .get_wills_by_owner_and_status(&c, &WillStatus::Cancelled, &None, &100)
+            .len(),
+        1
+    );
+    assert_eq!(client.get_will(&id).owner, a);
+}

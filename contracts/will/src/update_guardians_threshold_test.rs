@@ -15,7 +15,10 @@ use soroban_sdk::{
     vec, Address, Env,
 };
 
-use crate::{Allocation, Beneficiary, WillContract, WillContractClient, WillError};
+use crate::{
+    Allocation, Beneficiary, GuardianVoteReason, WillContract, WillContractClient, WillError,
+    WillStatus,
+};
 
 const DAY: u64 = 86_400;
 
@@ -165,4 +168,87 @@ fn update_guardians_valid_shrink_then_cooldown_blocks_trigger() {
     client.accept_guardian_role(&will_id, &g1);
     client.guardian_trigger(&will_id, &g1, &crate::GuardianVoteReason::Unreachable);
     assert_eq!(client.get_will(&will_id).guardian_votes, 1);
+}
+
+// ---------------------------------------------------------------------------
+// Issue #182: enabling a committee from an empty list
+// ---------------------------------------------------------------------------
+
+fn setup_no_guardians<'a>() -> (Env, WillContractClient<'a>, Address, u64) {
+    let env = Env::default();
+    env.mock_all_auths();
+    env.ledger().set_timestamp(1_700_000_000);
+    let owner = Address::generate(&env);
+    let token = env
+        .register_stellar_asset_contract_v2(owner.clone())
+        .address();
+    StellarAssetClient::new(&env, &token).mint(&owner, 1_000_000);
+    let id = env.register(WillContract, ());
+    let client = WillContractClient::new(&env, &id);
+    let will_id = client.create_will(
+        &owner,
+        &vec![&env, (token, 1_000_000_i128)],
+        &vec![
+            &env,
+            Beneficiary {
+                address: Address::generate(&env),
+                allocation: Allocation::Percentage(10_000),
+            },
+        ],
+        &90,
+        &7,
+        &vec![&env],
+        &0,
+        &None,
+        &0,
+    );
+    (env, client, owner, will_id)
+}
+
+#[test]
+fn update_guardians_sets_positive_threshold_when_enabling() {
+    let (env, client, owner, will_id) = setup_no_guardians();
+    let g1 = Address::generate(&env);
+    let g2 = Address::generate(&env);
+    let g3 = Address::generate(&env);
+
+    client.update_guardians(
+        &will_id,
+        &owner,
+        &vec![&env, g1.clone(), g2.clone(), g3.clone()],
+    );
+    assert_eq!(client.get_will(&will_id).guardian_threshold, 2);
+
+    env.ledger().with_mut(|l| l.timestamp += 8 * DAY);
+    client.accept_guardian_role(&will_id, &g1);
+    client.guardian_trigger(&will_id, &g1, &GuardianVoteReason::Unreachable);
+    assert_eq!(client.get_will(&will_id).status, WillStatus::Active);
+    client.accept_guardian_role(&will_id, &g2);
+    client.guardian_trigger(&will_id, &g2, &GuardianVoteReason::Unreachable);
+    assert_eq!(client.get_will(&will_id).status, WillStatus::Triggered);
+}
+
+#[test]
+fn update_will_settings_sets_positive_threshold_when_enabling() {
+    let (env, client, owner, will_id) = setup_no_guardians();
+    let g1 = Address::generate(&env);
+    let g2 = Address::generate(&env);
+
+    client.update_will_settings(
+        &will_id,
+        &owner,
+        &None,
+        &Some(vec![&env, g1.clone(), g2.clone()]),
+        &None,
+        &None,
+    );
+    assert_eq!(client.get_will(&will_id).guardian_threshold, 2);
+
+    env.ledger().with_mut(|l| l.timestamp += 8 * DAY);
+    client.accept_guardian_role(&will_id, &g1);
+    client.guardian_trigger(&will_id, &g1, &GuardianVoteReason::Unreachable);
+    assert_eq!(client.get_will(&will_id).status, WillStatus::Active);
+    client.accept_guardian_role(&will_id, &g2);
+    client.guardian_trigger(&will_id, &g2, &GuardianVoteReason::Unreachable);
+    assert_eq!(client.get_will(&will_id).status, WillStatus::Triggered);
 }

@@ -13,12 +13,20 @@
 //! SDK or client that encodes `create_will` arguments independently
 //! (e.g. williams-sdk — see companion spec-drift-check in williams-sdk#101).
 //!
-//! # Updating the fixture
+//! # Read-only by default
 //!
-//! When you intentionally change the `create_will` signature, run:
+//! A normal `cargo test` run never modifies the fixture. If the fixture is
+//! missing, uninitialised (contains `GENERATE`), or does not match the live
+//! encoding, the verifier fails with instructions to regenerate explicitly.
+//!
+//! # Updating the fixture (explicit opt-in)
+//!
+//! When you intentionally change the `create_will` signature, run the
+//! regeneration test explicitly. It is `#[ignore]`d so it never runs as part
+//! of a normal test pass:
 //!
 //! ```text
-//! cargo test -p will --lib test_spec_fixture_create_will_update -- --nocapture
+//! cargo test -p will --lib test_spec_fixture_create_will_update -- --ignored --nocapture
 //! ```
 //!
 //! That test prints the new hex and writes it into the fixture file. Commit
@@ -47,56 +55,87 @@ const FIXTURE_PATH: &str = concat!(
 /// with the function signature.
 const SPEC_XDR: &[u8] = &WillContract::spec_xdr_create_will();
 
-/// Verifies that the live spec matches the checked-in fixture.
-///
-/// If the fixture contains `"GENERATE"`, it is treated as uninitialised and
-/// this test writes the current encoding into it (first-run bootstrap), then
-/// passes. On every subsequent run the fixture is compared byte-for-byte.
-#[test]
-fn test_spec_fixture_create_will() {
-    let current_hex = to_hex(SPEC_XDR);
+/// The command developers should run to regenerate the fixture explicitly.
+const REGEN_COMMAND: &str =
+    "cargo test -p will --lib test_spec_fixture_create_will_update -- --ignored --nocapture";
 
-    let fixture_content = std::fs::read_to_string(FIXTURE_PATH)
-        .unwrap_or_else(|e| panic!("Could not read fixture at {FIXTURE_PATH}: {e}"));
-
-    // Extract the hex line: the last non-comment, non-empty line.
-    let fixture_hex = fixture_content
+/// Extract the hex line (last non-comment, non-empty line) from fixture text.
+fn extract_fixture_hex(fixture_content: &str) -> String {
+    fixture_content
         .lines()
         .rfind(|l| !l.starts_with('#') && !l.is_empty())
         .unwrap_or("")
         .trim()
-        .to_owned();
-
-    if fixture_hex == "GENERATE" {
-        // First-run bootstrap: write the current encoding into the fixture.
-        write_fixture(&current_hex);
-        println!("create_will spec fixture initialised:\n{current_hex}");
-        return;
-    }
-
-    assert_eq!(
-        current_hex, fixture_hex,
-        "\ncreate_will XDR spec has changed — the contract's API no longer matches \
-         the checked-in fixture.\n\
-         \n\
-         If this change is intentional, run:\n\
-         \n  cargo test -p will --lib test_spec_fixture_create_will_update -- --nocapture\n\
-         \n\
-         to update the fixture, then commit the updated \
-         src/fixtures/create_will_spec.txt alongside your code change.\n\
-         \n\
-         Also coordinate with williams-sdk#101 so the SDK's expected encoding \
-         is updated in the same release window.\n"
-    );
+        .to_owned()
 }
 
-/// Updates the fixture file with the current XDR encoding. Run this test
-/// explicitly after an intentional signature change to regenerate the fixture:
+/// Compare the live encoding against fixture text, returning `Ok(())` on a
+/// match and a descriptive error otherwise. This never writes to disk.
+fn verify_fixture_content(fixture_content: &str, current_hex: &str) -> Result<(), String> {
+    let fixture_hex = extract_fixture_hex(fixture_content);
+
+    if fixture_hex.is_empty() || fixture_hex == "GENERATE" {
+        return Err(format!(
+            "\ncreate_will XDR spec fixture is missing or uninitialised (found {fixture_hex:?}).\n\
+             \n\
+             This test is read-only and will not write the fixture. To initialise it, run:\n\
+             \n  {REGEN_COMMAND}\n\
+             \n\
+             then commit the updated src/fixtures/create_will_spec.txt.\n"
+        ));
+    }
+
+    if fixture_hex != current_hex {
+        return Err(format!(
+            "\ncreate_will XDR spec has changed — the contract's API no longer matches \
+             the checked-in fixture.\n\
+             \n\
+             If this change is intentional, run:\n\
+             \n  {REGEN_COMMAND}\n\
+             \n\
+             to update the fixture, then commit the updated \
+             src/fixtures/create_will_spec.txt alongside your code change.\n\
+             \n\
+             Also coordinate with williams-sdk#101 so the SDK's expected encoding \
+             is updated in the same release window.\n"
+        ));
+    }
+
+    Ok(())
+}
+
+/// Verifies that the live spec matches the checked-in fixture.
+///
+/// This test is strictly read-only: it never writes to the fixture. If the
+/// fixture is missing, uninitialised (`GENERATE`), or mismatched, it fails
+/// with instructions to regenerate explicitly.
+#[test]
+fn test_spec_fixture_create_will() {
+    let current_hex = to_hex(SPEC_XDR);
+
+    let fixture_content = std::fs::read_to_string(FIXTURE_PATH).unwrap_or_else(|e| {
+        panic!(
+            "Could not read fixture at {FIXTURE_PATH}: {e}\n\
+             \n\
+             This test is read-only and will not create the fixture. To generate it, run:\n\
+             \n  {REGEN_COMMAND}\n"
+        )
+    });
+
+    if let Err(msg) = verify_fixture_content(&fixture_content, &current_hex) {
+        panic!("{msg}");
+    }
+}
+
+/// Updates the fixture file with the current XDR encoding. This test is
+/// `#[ignore]`d so a normal `cargo test` never rewrites the fixture. Run it
+/// explicitly after an intentional signature change to regenerate:
 ///
 /// ```text
-/// cargo test -p will --lib test_spec_fixture_create_will_update -- --nocapture
+/// cargo test -p will --lib test_spec_fixture_create_will_update -- --ignored --nocapture
 /// ```
 #[test]
+#[ignore = "writes the fixture; run explicitly with --ignored to regenerate"]
 fn test_spec_fixture_create_will_update() {
     let current_hex = to_hex(SPEC_XDR);
     write_fixture(&current_hex);
@@ -127,4 +166,104 @@ fn write_fixture(new_hex: &str) {
 
     std::fs::write(FIXTURE_PATH, &new_content)
         .unwrap_or_else(|e| panic!("Could not write fixture at {FIXTURE_PATH}: {e}"));
+}
+
+#[cfg(test)]
+mod read_only_tests {
+    use super::*;
+
+    /// Build a unique temporary fixture path for a test.
+    fn temp_fixture_path(tag: &str) -> std::path::PathBuf {
+        let mut path = std::env::temp_dir();
+        path.push(format!(
+            "create_will_spec_{tag}_{}_{}.txt",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or(0)
+        ));
+        path
+    }
+
+    const HEADER: &str = "# create_will XDR spec fixture\n#\n";
+
+    #[test]
+    fn verify_accepts_matching_fixture() {
+        let content = format!("{HEADER}deadbeef\n");
+        assert!(verify_fixture_content(&content, "deadbeef").is_ok());
+    }
+
+    #[test]
+    fn verify_rejects_mismatch() {
+        let content = format!("{HEADER}deadbeef\n");
+        let err = verify_fixture_content(&content, "cafebabe").unwrap_err();
+        assert!(err.contains("has changed"), "unexpected error: {err}");
+    }
+
+    #[test]
+    fn verify_rejects_generate_without_writing() {
+        let content = format!("{HEADER}GENERATE\n");
+        let err = verify_fixture_content(&content, "deadbeef").unwrap_err();
+        assert!(
+            err.contains("uninitialised"),
+            "unexpected error: {err}"
+        );
+        // The input content must be untouched (pure function, no writes).
+        assert_eq!(content, format!("{HEADER}GENERATE\n"));
+    }
+
+    #[test]
+    fn verify_rejects_empty_fixture() {
+        let content = format!("{HEADER}\n");
+        let err = verify_fixture_content(&content, "deadbeef").unwrap_err();
+        assert!(err.contains("uninitialised"), "unexpected error: {err}");
+    }
+
+    #[test]
+    fn verifier_does_not_modify_temp_fixture_across_threads() {
+        let path = temp_fixture_path("verify");
+        let original = format!("{HEADER}deadbeef\n");
+        std::fs::write(&path, &original).unwrap();
+
+        let before = std::fs::read(&path).unwrap();
+
+        // Run the read-only verification repeatedly from multiple threads.
+        let mut handles = Vec::new();
+        for _ in 0..8 {
+            let p = path.clone();
+            handles.push(std::thread::spawn(move || {
+                for _ in 0..50 {
+                    let content = std::fs::read_to_string(&p).unwrap();
+                    assert!(verify_fixture_content(&content, "deadbeef").is_ok());
+                }
+            }));
+        }
+        for h in handles {
+            h.join().unwrap();
+        }
+
+        let after = std::fs::read(&path).unwrap();
+        assert_eq!(before, after, "read-only verifier must not modify fixture");
+
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn generate_input_fails_without_writing_temp_fixture() {
+        let path = temp_fixture_path("generate");
+        let original = format!("{HEADER}GENERATE\n");
+        std::fs::write(&path, &original).unwrap();
+
+        let before = std::fs::read(&path).unwrap();
+
+        let content = std::fs::read_to_string(&path).unwrap();
+        let err = verify_fixture_content(&content, "deadbeef").unwrap_err();
+        assert!(err.contains("uninitialised"), "unexpected error: {err}");
+
+        let after = std::fs::read(&path).unwrap();
+        assert_eq!(before, after, "GENERATE must not trigger a write");
+
+        let _ = std::fs::remove_file(&path);
+    }
 }

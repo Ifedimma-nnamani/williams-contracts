@@ -56,10 +56,18 @@ pub fn will_confirmed(env: &Env, will_id: u64, owner: &Address) {
 }
 
 /// Published when the owner checks in, resetting the check-in deadline.
-pub fn check_in(env: &Env, will_id: u64, owner: &Address, next_deadline: u64) {
+///
+/// Data: `(owner, checked_in_at, next_deadline, seconds_remaining)` so keepers
+/// can schedule trigger jobs without extra RPC queries (#127).
+pub fn check_in(env: &Env, will_id: u64, owner: &Address, checked_in_at: u64, next_deadline: u64) {
     env.events().publish(
         (symbol_short!("checkin"), will_id),
-        (owner.clone(), next_deadline),
+        (
+            owner.clone(),
+            checked_in_at,
+            next_deadline,
+            next_deadline.saturating_sub(checked_in_at),
+        ),
     );
 }
 
@@ -335,6 +343,10 @@ pub fn beneficiary_renounced(
 /// [`guardians_updated`] so that off-chain consumers subscribed to the dedicated
 /// `"guardup"` topic receive the notification consistently, regardless of which
 /// entry point (`update_guardians` or `update_will_settings`) made the change.
+///
+/// This event is **only** emitted when at least one field actually changes: an
+/// `update_will_settings` call whose optional parameters are all `None` is a
+/// no-op that neither rewrites the will nor publishes this event (#282).
 pub fn will_settings_updated(
     env: &Env,
     will_id: u64,
@@ -477,6 +489,21 @@ pub fn payout_failed(env: &Env, will_id: u64, token: &Address, recipient: &Addre
     );
 }
 
+/// Published when an owner refund is deferred because the token refused the
+/// transfer during `cancel_will`, `refund_unconfirmed_will` or
+/// `guardian_cancel_pending_will` (#213).
+///
+/// The refund is recorded in storage exactly like a failed beneficiary payout
+/// and can be recovered later via `retry_failed_payout`; every other token in
+/// the same refund loop is unaffected. Indexers can track deferred owner
+/// refunds the same way they track deferred beneficiary payouts.
+pub fn owner_refund_failed(env: &Env, will_id: u64, token: &Address, owner: &Address, amount: i128) {
+    env.events().publish(
+        (symbol_short!("ownfail"), will_id),
+        (token.clone(), owner.clone(), amount),
+    );
+}
+
 /// Published when `retry_failed_payout` successfully delivers a previously
 /// failed payout (#459). The `fully_resolved` flag indicates whether this
 /// retry cleared the recorded failed payout for the exact
@@ -525,13 +552,32 @@ pub fn payout_redirected(
 /// Topics: `("portmig", old_owner)`.
 /// Data: `new_owner` — the address that now holds the migrated indexes.
 ///
-/// Emitted by `WillContract::migrate_owner_portfolio` after both
-/// `DataKey::OwnerWills` and all `DataKey::OwnerStatusWills` buckets have
-/// been transferred and the old keys have been pruned.  Off-chain indexers can
-/// use this event to update identity mappings without re-scanning every will.
-pub fn owner_portfolio_migrated(env: &Env, old_owner: &Address, new_owner: &Address) {
+/// This allows off‑chain indexers to differentiate a simple status reset from a
+/// fresh acceptance, which is required for correct consent‑dashboard behavior.
+pub fn guardian_reappointed_role(env: &Env, will_id: u64, guardian: &Address) {
     env.events().publish(
-        (symbol_short!("portmig"), old_owner.clone()),
-        new_owner.clone(),
+        (symbol_short!("guardian_reappointed"), will_id),
+        (guardian,),
+    );
+}
+
+/// Published when a live `Released` will's storage TTL is renewed because it
+/// still holds outstanding hashed claim reserves (issue #211).
+///
+/// Topics: `("keepalive", will_id)`.
+/// Data: `(timestamp, remaining_unclaimed_bps)` where `timestamp` is the
+/// ledger time of the renewal and `remaining_unclaimed_bps` is the total
+/// allocation (in basis points) still claimable by unrevealed hashed
+/// beneficiaries at that moment.
+///
+/// This is a rent-maintenance signal only: it never changes entitlements,
+/// beneficiary permissions or the will's status. Fully discharged records
+/// (no outstanding hashed reserves) are not kept alive and never emit this
+/// event, so terminal rent behaviour is preserved. The payload is fixed-size
+/// and bounded regardless of how many hashed reserves remain.
+pub fn will_keepalive(env: &Env, will_id: u64, timestamp: u64, remaining_unclaimed_bps: u32) {
+    env.events().publish(
+        (symbol_short!("keepalive"), will_id),
+        (timestamp, remaining_unclaimed_bps),
     );
 }

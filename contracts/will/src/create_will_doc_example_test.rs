@@ -13,6 +13,16 @@
 //! file stops compiling, which is exactly the signal the `ignore` tag removed.
 //!
 //! If you change the rustdoc example, change it here too, and vice versa.
+//!
+//! ## Executable-example strategy (#297)
+//!
+//! Rustdoc examples that need a full `Env`/contract harness cannot run as
+//! `cargo test --doc` doctests in the no_std contract context, so they are
+//! tagged ```` ```ignore ```` with a reason and mirrored here as compiled
+//! tests. This module is the canonical fixture for that pattern: the CI
+//! `cargo doc` gate (warning-failing) validates intra-doc links, and this test
+//! validates the example's API usage. When adding a new rustdoc example that
+//! requires setup, add its compiled twin here rather than leaving it unverified.
 
 use soroban_sdk::{testutils::Address as _, token::StellarAssetClient, vec, Address, Env};
 
