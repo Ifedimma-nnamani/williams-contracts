@@ -316,19 +316,48 @@ pub fn beneficiary_list_from(env: &Env, sc: &ScVal) -> Option<Vec<crate::Benefic
     Some(out)
 }
 
-/// Finds the event whose topics lead with `symbol` and — when `will_id` is
-/// given — whose second topic is `will_id`, panicking with a message naming
-/// `what` when the event is absent.
+/// Returns the XDR contract id of `event`'s emitter, or `None` when the event
+/// carries no contract id (e.g. diagnostic events).
+fn emitter_of(event: &ContractEvent) -> Option<&xdr::Hash> {
+    event.contract_id.as_ref()
+}
+
+/// Returns whether `event` was emitted by `emitter`.
 ///
-/// Only events from the last top-level invocation are visible: the host
-/// retains nothing older, so this must be called before any further contract
-/// call.
-pub fn find_event(env: &Env, symbol: Symbol, will_id: Option<u64>, what: &str) -> ContractEvent {
+/// Emitter identity is checked before any topic/payload matching so that
+/// identical topics published by another contract (for example a token
+/// fixture invoked from the same test) can never satisfy a will assertion.
+pub fn emitted_by(event: &ContractEvent, emitter: &Address) -> bool {
+    let expected = match soroban_sdk::xdr::ScAddress::from(emitter) {
+        soroban_sdk::xdr::ScAddress::Contract(hash) => hash,
+        _ => return false,
+    };
+    emitter_of(event) == Some(&expected)
+}
+
+/// Finds the event emitted by `emitter` whose topics lead with `symbol` and —
+/// when `will_id` is given — whose second topic is `will_id`, panicking with a
+/// message naming `what` when no such event from `emitter` exists.
+///
+/// Events from other contracts are ignored even when their topics collide, so
+/// an unrelated emitter cannot satisfy the assertion. Only events from the
+/// last top-level invocation are visible: the host retains nothing older, so
+/// this must be called before any further contract call.
+pub fn find_event(
+    env: &Env,
+    emitter: &Address,
+    symbol: Symbol,
+    will_id: Option<u64>,
+    what: &str,
+) -> ContractEvent {
     let events = env.events().all();
     events
         .events()
         .iter()
         .find(|event| {
+            if !emitted_by(event, emitter) {
+                return false;
+            }
             if topic_symbol(env, event).as_ref() != Some(&symbol) {
                 return false;
             }
@@ -338,24 +367,31 @@ pub fn find_event(env: &Env, symbol: Symbol, will_id: Option<u64>, what: &str) -
             }
         })
         .cloned()
-        .unwrap_or_else(|| panic!("{what} event not found"))
+        .unwrap_or_else(|| panic!("{what} event not found from emitter {emitter:?}"))
 }
 
-/// Counts the events whose leading topic is `symbol`.
+/// Counts the events emitted by `emitter` whose leading topic is `symbol`.
 ///
+/// Events from other contracts are excluded even when their topics collide.
 /// Like [`find_event`], only events from the last top-level invocation are
 /// visible.
-pub fn count_events(env: &Env, symbol: Symbol) -> u32 {
+pub fn count_events(env: &Env, emitter: &Address, symbol: Symbol) -> u32 {
     let events = env.events().all();
     events
         .events()
         .iter()
+        .filter(|event| emitted_by(event, emitter))
         .filter(|event| topic_symbol(env, event).as_ref() == Some(&symbol))
         .count() as u32
 }
 
 /// Builds the XDR form an event published by `contract_id` with the given
 /// topics and data takes, for use in `assert_eq!` against a found event.
+///
+/// The `contract_id` recorded here is the emitter identity that
+/// [`find_event`] and [`count_events`] enforce, so a full-equality assertion
+/// against a found event also proves the event came from the expected
+/// contract.
 pub fn expected_event(
     env: &Env,
     contract_id: &Address,
@@ -389,4 +425,111 @@ pub fn topics(env: &Env, symbol: Symbol, ids: &[u64]) -> Vec<Val> {
         out.push_back(id.into_val(env));
     }
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use soroban_sdk::testutils::Address as _;
+
+    /// A minimal contract that publishes an event with caller-chosen topics,
+    /// used to simulate a token fixture emitting colliding symbols/ids.
+    mod token_fixture {
+        use soroban_sdk::{contract, contractimpl, symbol_short, Address, Env};
+
+        #[contract]
+        pub struct TokenFixture;
+
+        #[contractimpl]
+        impl TokenFixture {
+            pub fn emit(env: Env, id: u64) {
+                env.events()
+                    .publish((symbol_short!("created"), id), id);
+            }
+
+            pub fn emit_other(env: Env, id: u64) {
+                env.events()
+                    .publish((symbol_short!("checkin"), id), id);
+            }
+        }
+    }
+
+    /// A minimal contract that publishes the same symbols/ids as the fixture.
+    mod will_fixture {
+        use soroban_sdk::{contract, contractimpl, symbol_short, Env};
+
+        #[contract]
+        pub struct WillFixture;
+
+        #[contractimpl]
+        impl WillFixture {
+            pub fn emit(env: Env, id: u64) {
+                env.events()
+                    .publish((symbol_short!("created"), id), id);
+            }
+
+            pub fn emit_other(env: Env, id: u64) {
+                env.events()
+                    .publish((symbol_short!("checkin"), id), id);
+            }
+        }
+    }
+
+    #[test]
+    fn lookups_and_counts_are_scoped_to_emitter() {
+        let env = Env::default();
+        let token_id = env.register(token_fixture::TokenFixture, ());
+        let will_id = env.register(will_fixture::WillFixture, ());
+        let token = token_fixture::TokenFixtureClient::new(&env, &token_id);
+        let will = will_fixture::WillFixtureClient::new(&env, &will_id);
+
+        // Publish identical symbol/id events from both contracts.
+        token.emit(&7);
+        will.emit(&7);
+
+        // Counts are scoped: each emitter sees exactly its own event.
+        assert_eq!(count_events(&env, &will_id, symbol_short!("created")), 1);
+        assert_eq!(count_events(&env, &token_id, symbol_short!("created")), 1);
+
+        // Lookups are scoped: the found event is the will's, not the token's.
+        let found = find_event(&env, &will_id, symbol_short!("created"), Some(7), "created");
+        assert!(emitted_by(&found, &will_id));
+        assert!(!emitted_by(&found, &token_id));
+
+        let token_found =
+            find_event(&env, &token_id, symbol_short!("created"), Some(7), "created");
+        assert!(emitted_by(&token_found, &token_id));
+        assert!(!emitted_by(&token_found, &will_id));
+
+        // A symbol only the token emitted cannot satisfy a will lookup.
+        token.emit_other(&7);
+        assert_eq!(count_events(&env, &will_id, symbol_short!("checkin")), 0);
+        assert_eq!(count_events(&env, &token_id, symbol_short!("checkin")), 1);
+    }
+
+    #[test]
+    #[should_panic(expected = "checkin event not found from emitter")]
+    fn missing_expected_emitter_event_fails_clearly() {
+        let env = Env::default();
+        let token_id = env.register(token_fixture::TokenFixture, ());
+        let will_id = env.register(will_fixture::WillFixture, ());
+        let token = token_fixture::TokenFixtureClient::new(&env, &token_id);
+
+        // Only the token emits; the will has no matching event.
+        token.emit_other(&7);
+        find_event(&env, &will_id, symbol_short!("checkin"), Some(7), "checkin");
+    }
+
+    #[test]
+    fn expected_event_records_emitter_identity() {
+        let env = Env::default();
+        let will_id = Address::generate(&env);
+        let event = expected_event(
+            &env,
+            &will_id,
+            topics(&env, symbol_short!("created"), &[7]),
+            7u64.into_val(&env),
+        );
+        assert!(emitted_by(&event, &will_id));
+    }
 }

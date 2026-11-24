@@ -10,12 +10,11 @@
 //! `Triggered` and unindexes the will from `TriggeredWills`.
 
 use soroban_sdk::{
-    testutils::{storage::Persistent as _, Address as _, Ledger},
-    token::StellarAssetClient,
+    testutils::{Address as _, Ledger},
+    token::{Client as TokenClient, StellarAssetClient},
     vec, Address, Env,
 };
 
-use crate::storage;
 use crate::{Allocation, Beneficiary, WillContract, WillContractClient, WillError, WillStatus};
 
 const DAY: u64 = 86_400;
@@ -70,7 +69,6 @@ fn cancel_will_allows_cancellation_from_triggered_status() {
     env.mock_all_auths();
     env.ledger().set_timestamp(1_700_000_000);
 
-    let owner = Address::generate(&env);
     let heir = Address::generate(&env);
     let (client, owner, token_address) = setup(&env);
     let will_id = create_will(&env, &client, &owner, &token_address, &heir);
@@ -80,7 +78,7 @@ fn cancel_will_allows_cancellation_from_triggered_status() {
     assert_eq!(client.get_will(&will_id).status, WillStatus::Triggered);
 
     // The will appears in the global TriggeredWills index while triggered.
-    assert!(storage::get_triggered_wills(&env).contains(&will_id));
+    assert!(client.get_triggered_wills(&None, &10).contains(will_id));
 
     // Owner cancels directly from `Triggered` — no emergency_checkin first.
     client.cancel_will(&will_id, &owner);
@@ -89,7 +87,7 @@ fn cancel_will_allows_cancellation_from_triggered_status() {
     assert_eq!(will.status, WillStatus::Cancelled);
 
     // The will is no longer indexed as triggered.
-    assert!(!storage::get_triggered_wills(&env).contains(&will_id));
+    assert!(!client.get_triggered_wills(&None, &10).contains(will_id));
 }
 
 #[test]
@@ -98,18 +96,20 @@ fn cancel_will_from_triggered_transfers_funds_back_to_owner() {
     env.mock_all_auths();
     env.ledger().set_timestamp(1_700_000_000);
 
-    let owner = Address::generate(&env);
     let heir = Address::generate(&env);
     let (client, owner, token_address) = setup(&env);
     let will_id = create_will(&env, &client, &owner, &token_address, &heir);
 
     trigger_will(&env, &client, will_id);
 
-    let balance_before = StellarAssetClient::new(&env, &token_address).balance(&owner);
+    let balance_before = TokenClient::new(&env, &token_address).balance(&owner);
     client.cancel_will(&will_id, &owner);
 
-    let balance_after = StellarAssetClient::new(&env, &token_address).balance(&owner);
-    assert!(balance_after > balance_before, "owner must reclaim locked tokens");
+    let balance_after = TokenClient::new(&env, &token_address).balance(&owner);
+    assert!(
+        balance_after > balance_before,
+        "owner must reclaim locked tokens"
+    );
     assert_eq!(client.get_will(&will_id).status, WillStatus::Cancelled);
 }
 
@@ -119,7 +119,6 @@ fn cancel_will_rejects_non_owner_from_triggered() {
     env.mock_all_auths();
     env.ledger().set_timestamp(1_700_000_000);
 
-    let owner = Address::generate(&env);
     let stranger = Address::generate(&env);
     let heir = Address::generate(&env);
     let (client, owner, token_address) = setup(&env);

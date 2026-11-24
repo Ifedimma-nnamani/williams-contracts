@@ -114,3 +114,84 @@ fn top_up_of_an_existing_token_still_works_at_the_cap() {
     assert_eq!(will.balances.len(), MAX_TOKENS);
     assert_eq!(will.balances.get(existing).unwrap(), 150);
 }
+
+/// Builds a will whose first token is `primary` (so two wills can share a
+/// primary token) plus the supplied secondary tokens.
+fn will_with_secondary<'a>(
+    env: &Env,
+    client: &WillContractClient<'a>,
+    owner: &Address,
+    primary: &Address,
+    secondary: &Vec<Address>,
+    beneficiary: &Address,
+) -> u64 {
+    let mut tokens: Vec<(Address, i128)> = Vec::new(env);
+    tokens.push_back((primary.clone(), 100_i128));
+    for token in secondary.iter() {
+        tokens.push_back((token.clone(), 100_i128));
+    }
+    client.create_will(
+        owner,
+        &tokens,
+        &vec![
+            env,
+            Beneficiary {
+                address: beneficiary.clone(),
+                allocation: Allocation::Percentage(10_000),
+            },
+        ],
+        &90,
+        &7,
+        &vec![env],
+        &0,
+        &None,
+        &0,
+    )
+}
+
+#[test]
+fn merge_rejects_a_token_union_above_the_cap() {
+    let (env, client, owner) = setup();
+    let primary = new_token(&env, &owner, 1_000);
+    let mut secondary_a: Vec<Address> = Vec::new(&env);
+    let mut secondary_b: Vec<Address> = Vec::new(&env);
+    for _ in 0..9 {
+        secondary_a.push_back(new_token(&env, &owner, 1_000));
+        secondary_b.push_back(new_token(&env, &owner, 1_000));
+    }
+    let beneficiary = Address::generate(&env);
+    let a = will_with_secondary(
+        &env, &client, &owner, &primary, &secondary_a, &beneficiary,
+    );
+    let b = will_with_secondary(
+        &env, &client, &owner, &primary, &secondary_b, &beneficiary,
+    );
+
+    // 1 shared primary + 9 + 9 disjoint secondaries = 19 distinct tokens.
+    assert_eq!(
+        client.try_merge_wills(&owner, &a, &b),
+        Err(Ok(WillError::MergeWouldExceedLimits.into())),
+        "merge must reject a 19-token union before mutating the survivor"
+    );
+    assert_eq!(client.get_will(&a).balances.len(), MAX_TOKENS);
+}
+
+#[test]
+fn merge_allows_overlapping_sets_whose_union_fits() {
+    let (env, client, owner) = setup();
+    let primary = new_token(&env, &owner, 1_000);
+    let mut secondary: Vec<Address> = Vec::new(&env);
+    for _ in 0..9 {
+        secondary.push_back(new_token(&env, &owner, 1_000));
+    }
+    let beneficiary = Address::generate(&env);
+    let a = will_with_secondary(
+        &env, &client, &owner, &primary, &secondary, &beneficiary,
+    );
+    let b = will_with_secondary(
+        &env, &client, &owner, &primary, &secondary, &beneficiary,
+    );
+
+    client.merge_wills(&owner, &a, &b);
+    assert_eq!(client.get_will(&a).balances.len(), MAX_TOKENS);
+}
