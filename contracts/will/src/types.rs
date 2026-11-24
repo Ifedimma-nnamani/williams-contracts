@@ -82,17 +82,16 @@ pub struct Guardian {
 
 /// A privacy-preserving beneficiary entry (issue #46).
 ///
-/// Instead of a raw address the owner stores a SHA-256 commitment hash of the
-/// pre-image `<address.to_xdr()> || <salt_bytes>`. At claim time the
-/// beneficiary calls `reveal_and_claim` with the pre-image. The contract checks
-/// that the pre-image's address prefix is the caller's own address, checks that
-/// its hash matches the stored commitment, and pays out to that address
-/// (issue #452).
+/// The commitment is `sha256(sha256(xdr(beneficiary)) || salt)`. Here
+/// `xdr(beneficiary)` is the Stellar `ScVal::Address` encoding returned by
+/// `Address::to_xdr`, and `salt` is exactly 32 random bytes. The beneficiary
+/// reveals the 64-byte address digest and salt to claim the reserved share.
+///
+/// See SECURITY.md for Rust and JavaScript examples and test vectors.
 #[contracttype]
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct HashedBeneficiary {
-    /// 32-byte SHA-256 hash of the pre-image (XDR-encoded address concatenated
-    /// with salt).
+    /// 32-byte SHA-256 digest of the address fingerprint followed by the salt.
     pub commitment: Bytes,
     /// Percentage of the will's balance this beneficiary receives.
     pub percentage: u32,
@@ -283,8 +282,15 @@ pub struct Will {
     pub balances: Map<Address, i128>,
     /// The token contract (e.g. a USDC Stellar Asset Contract) held by the will.
     pub token: Address,
-    /// Whether the held asset is native XLM (as opposed to a token contract).
-    /// When `true`, transfers use `env.transfer()` instead of the token client.
+    /// Legacy/reserved compatibility field, retained only for stored-layout
+    /// and wire compatibility. It is **not** an active transfer-mode switch:
+    /// no production code reads it to choose a transfer primitive, and every
+    /// creation path stores `false`.
+    ///
+    /// Native XLM is represented by its Stellar Asset Contract address and is
+    /// transferred through `token::Client` (SEP-41) exactly like any other
+    /// token — there is no native-asset special case. Do not remove this field
+    /// or change its serialization/layout.
     pub is_native: bool,
     /// The amount of `token` currently locked in the will, in the token's base units.
     /// A legacy mirror of `balances[token]` kept for backward compatibility;
@@ -334,6 +340,12 @@ pub struct Will {
     pub grace_period_days: u64,
     /// Unix timestamp (seconds) of the owner's last check-in.
     pub last_checkin: u64,
+    /// Unix timestamp (seconds) until which re-triggering is blocked after an
+    /// `emergency_checkin` (#104). `0` for newly created, cloned, split and
+    /// legacy-migrated wills, which have no cooldown pending yet. This is the
+    /// cooldown deadline, distinct from `last_checkin + checkin_period_days`
+    /// (the missed check-in deadline used to start the grace period).
+    pub trigger_cooldown_until: u64,
     /// Unix timestamp (seconds) at which the grace period started, if the
     /// will is triggered. This is the missed check-in deadline
     /// (`last_checkin + checkin_period_days`), not the time `trigger_will`
@@ -476,6 +488,40 @@ pub enum GuardianVoteReason {
     Unreachable = 2,
     /// Any other reason not covered by the above.
     Other = 3,
+}
+
+/// Public status of a guardian's vote to **cancel** the current trigger
+/// (issue #214).
+///
+/// This is the cancellation counterpart of the trigger-vote inspection
+/// returned by `get_guardian_vote_status`, and is deliberately a distinct
+/// type so a caller can never confuse a release vote with a cancel vote.
+/// It is read-only: querying it requires no authorization and mutates no
+/// state.
+///
+/// A vote only counts toward the live cancellation tally while it is
+/// unexpired and the guardian is still on the will's guardian list with
+/// `GuardianConsent::Accepted` consent — exactly the rules
+/// `recount_guardian_cancel_votes` applies. `has_voted` reports whether a
+/// record exists at all; `is_live` reports whether that record currently
+/// counts toward quorum.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct GuardianCancelVoteStatus {
+    /// Whether the guardian has a stored cancellation vote record for the
+    /// current trigger cycle, live or expired.
+    pub has_voted: bool,
+    /// Whether the stored vote is currently counted toward the cancellation
+    /// quorum (unexpired, guardian still listed and accepted).
+    pub is_live: bool,
+    /// Unix timestamp (seconds) at which the stored vote was cast, if any.
+    pub voted_at: Option<u64>,
+    /// Unix timestamp (seconds) at which the stored vote expires, if any.
+    /// `None` when no vote record exists.
+    pub expires_at: Option<u64>,
+    /// The guardian's vote weight as currently configured on the will, or 0
+    /// if the guardian is no longer listed.
+    pub weight: u32,
 }
 
 /// A single entry in a will's on-chain audit trail, recording one status

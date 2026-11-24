@@ -11,6 +11,8 @@ use soroban_sdk::{
     Address, Env,
 };
 
+use crate::{Allocation, Beneficiary, WillContract, WillContractClient, WillError, WillStatus};
+
 /// Helper: build an env with a mock token that can be made to fail transfers.
 fn setup_env() -> (Env, Address, Address, Address) {
     let env = Env::default();
@@ -354,4 +356,30 @@ fn test_renew_failed_payout_ttl_assertions_across_aging() {
         ttl_after
     );
     assert!(ttl_after > 0, "TTL must be positive after renewal");
+}
+
+#[test]
+fn request_grace_extension_rejects_after_grace_expired() {
+    let env = Env::default();
+    env.mock_all_auths();
+    env.ledger().set_timestamp(1_700_000_000);
+
+    let heir = Address::generate(&env);
+    let (client, owner, token_address) = setup(&env);
+    let will_id = create_will(&env, &client, &owner, &token_address, &heir);
+
+    trigger_will(&env, &client, will_id);
+
+    // Advance past the grace period (7 days).
+    advance(&env, 8);
+
+    let err = client
+        .try_request_grace_extension(&will_id, &owner, &7)
+        .unwrap_err()
+        .unwrap();
+    assert_eq!(
+        err,
+        WillError::GracePeriodExpired.into(),
+        "extension after grace expiry is rejected"
+    );
 }

@@ -14,6 +14,8 @@ use crate::{Will, WillStatus};
 use soroban_sdk::testutils::{Address as _, Ledger as _};
 use soroban_sdk::{Address, Env, String, Vec};
 
+use crate::{Allocation, Beneficiary, WillContract, WillContractClient, WillError, WillStatus};
+
 /// Helper: build a minimal live will for the given owner.
 fn make_live_will(env: &Env, owner: &Address) -> Will {
     Will {
@@ -42,6 +44,44 @@ fn make_entry(env: &Env, seq: u32) -> HistoryEntry {
 fn age_ledger(env: &Env, seconds: u64) {
     let current = env.ledger().timestamp();
     env.ledger().set_timestamp(current + seconds);
+}
+
+fn setup(env: &Env) -> (WillContractClient<'_>, Address, Address) {
+    let owner = Address::generate(env);
+    let sac = env.register_stellar_asset_contract_v2(owner.clone());
+    let token_address = sac.address();
+    StellarAssetClient::new(env, &token_address).mint(&owner, &10_000_000);
+
+    let contract_id = env.register(WillContract, ());
+    let client = WillContractClient::new(env, &contract_id);
+    (client, owner, token_address)
+}
+
+fn make_create_call<'a>(
+    client: &WillContractClient<'a>,
+    env: &Env,
+    owner: &Address,
+    token_address: &Address,
+    beneficiary: &Address,
+    delay_seconds: u64,
+) -> u64 {
+    client.create_will(
+        owner,
+        &vec![env, (token_address.clone(), 1_000_000_i128)],
+        &vec![
+            env,
+            Beneficiary {
+                address: beneficiary.clone(),
+                allocation: Allocation::Percentage(10_000),
+            },
+        ],
+        &90,
+        &7,
+        &vec![env],
+        &0,
+        &None,
+        &delay_seconds,
+    )
 }
 
 #[test]
@@ -191,6 +231,42 @@ fn archival_removes_history_and_seq_keys() {
 }
 
 #[test]
+fn create_will_rejects_delay_below_threshold() {
+    let env = Env::default();
+    env.mock_all_auths();
+    env.ledger().set_timestamp(1_700_000_000);
+
+    let heir = Address::generate(&env);
+    let (client, owner, token_address) = setup(&env);
+
+    let err = client
+        .try_create_will(
+            &owner,
+            &vec![&env, (token_address.clone(), 1_000_000_i128)],
+            &vec![
+                &env,
+                Beneficiary {
+                    address: heir.clone(),
+                    allocation: Allocation::Percentage(10_000),
+                },
+            ],
+            &90,
+            &7,
+            &vec![&env],
+            &0,
+            &None,
+            &5, // below MIN_CONFIRMATION_DELAY (300s)
+        )
+        .unwrap_err()
+        .unwrap();
+    assert_eq!(
+        err,
+        WillError::InvalidPeriod.into(),
+        "confirmation delay of 5s must be rejected"
+    );
+}
+
+#[test]
 fn archival_does_not_extend_terminal_retention() {
     let env = Env::default();
     env.mock_all_auths();
@@ -236,4 +312,22 @@ fn archival_does_not_extend_terminal_retention() {
         .storage()
         .persistent()
         .has(&storage::history_seq_key(&owner)));
+}
+
+#[test]
+fn create_will_accepts_delay_at_threshold() {
+    let env = Env::default();
+    env.mock_all_auths();
+    env.ledger().set_timestamp(1_700_000_000);
+
+    let heir = Address::generate(&env);
+    let (client, owner, token_address) = setup(&env);
+
+    // Exactly MIN_CONFIRMATION_DELAY (300s) is accepted.
+    let will_id = make_create_call(&client, &env, &owner, &token_address, &heir, 300);
+    assert_eq!(
+        client.get_will(&will_id).status,
+        WillStatus::PendingConfirmation,
+        "delay at threshold starts PendingConfirmation"
+    );
 }

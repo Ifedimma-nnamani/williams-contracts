@@ -302,3 +302,69 @@ fn repair_protocol_stats_requires_caller_auth() {
     let repaired = client.repair_protocol_stats(&caller);
     assert_eq!(repaired.active_will_count, 1);
 }
+
+#[test]
+fn legacy_locked_totals_stay_zero_after_cancel_and_restart_on_deposit() {
+    for repair in [false, true] {
+        let (env, client, owner, token, contract_id) = setup();
+        let beneficiary = Address::generate(&env);
+        let create = |amount| {
+            client.create_will(
+                &owner,
+                &vec![&env, (token.clone(), amount)],
+                &vec![
+                    &env,
+                    Beneficiary {
+                        address: beneficiary.clone(),
+                        allocation: Allocation::Percentage(10_000),
+                    },
+                ],
+                &90,
+                &7,
+                &vec![&env],
+                &0,
+                &None,
+                &0,
+            )
+        };
+        let assert_total = |expected| {
+            assert!(client.audit_protocol_stats().consistent);
+            env.as_contract(&contract_id, || {
+                assert_eq!(storage::get_total_locked(&env, &token), expected);
+            });
+        };
+
+        let first = create(1000);
+        let stats = client.audit_protocol_stats().stored;
+        env.as_contract(&contract_id, || {
+            use storage::DataKey;
+
+            let instance = env.storage().instance();
+            let total = DataKey::TotalLocked(token.clone());
+            env.storage().persistent().remove(&total);
+            instance.remove(&DataKey::ProtocolTokens);
+            instance.remove(&DataKey::ActiveWillCount);
+            instance.set(&DataKey::ProtocolStats, &stats);
+            instance.set(&total, &1000_i128);
+        });
+        assert_total(1000);
+
+        if repair {
+            assert_eq!(client.repair_protocol_stats(&owner), stats);
+            // Simulate an old instance entry outside the index when repair ran.
+            env.as_contract(&contract_id, || {
+                env.storage()
+                    .instance()
+                    .set(&storage::DataKey::TotalLocked(token.clone()), &1000_i128);
+            });
+            assert_total(1000);
+        }
+        client.cancel_will(&first, &owner);
+        assert_total(0);
+
+        let second = create(100);
+        assert_total(100);
+        client.top_up(&second, &owner, &token, &50);
+        assert_total(150);
+    }
+}

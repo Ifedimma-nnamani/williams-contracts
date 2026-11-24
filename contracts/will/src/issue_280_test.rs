@@ -90,3 +90,61 @@ fn top_up_is_rejected_for_a_released_will() {
         Err(Ok(WillError::WillNotActive.into()))
     );
 }
+
+// ---------------------------------------------------------------------------
+// README handoff reconciliation anchors (issue #280).
+//
+// The handoff notes previously claimed owner validation relied on SDK-side
+// logic and referenced an `allocate_funds` allocator. These tests pin the
+// current, native behaviour so the README dispositions stay verifiable.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn cancel_will_requires_owner_auth() {
+    let (env, client, owner, _token_address, will_id) = setup();
+
+    // With auths mocked the owner can cancel.
+    client.cancel_will(&will_id, &owner);
+
+    // Without mocked auths, the owner.require_auth() in cancel_will must fail.
+    let (env2, client2, owner2, _token2, will_id2) = setup();
+    env2.set_auths(&[]);
+    assert!(
+        client2.try_cancel_will(&will_id2, &owner2).is_err(),
+        "cancel_will must require owner auth"
+    );
+    let _ = env;
+}
+
+#[test]
+fn load_owned_rejects_non_owner() {
+    let (env, client, owner, token_address, will_id) = setup();
+    let stranger = Address::generate(&env);
+
+    // A non-owner cannot cancel (load_owned verifies persisted owner).
+    assert_eq!(
+        client.try_cancel_will(&will_id, &stranger),
+        Err(Ok(WillError::Unauthorized.into()))
+    );
+
+    // The persisted owner is still intact after the rejected attempt.
+    client.cancel_will(&will_id, &owner);
+    let _ = token_address;
+}
+
+#[test]
+fn distribute_uses_vector_transfer_plan() {
+    let (env, client, owner, token_address, will_id) = setup();
+
+    env.ledger().with_mut(|l| l.timestamp += 91 * DAY);
+    client.trigger_will(&will_id);
+    env.ledger().with_mut(|l| l.timestamp += 8 * DAY);
+
+    // Distribution succeeds through the vector-based transfer plan; there is
+    // no `allocate_funds` entrypoint on the contract client.
+    client.release_inheritance(&will_id, &None);
+
+    let token = soroban_sdk::token::TokenClient::new(&env, &token_address);
+    let _ = token;
+    let _ = owner;
+}

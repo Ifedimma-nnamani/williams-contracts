@@ -23,9 +23,10 @@ test:
 lint:
     cargo clippy --all-targets -- -D warnings
 
-# Build the contract for the wasm32v1-none target in release mode.
+# Build the contract for the wasm32v1-none target in release mode using the
+# canonical locked build command shared by CI, size/spec checks and deployment.
 build:
-    cargo build --workspace --release --target wasm32v1-none
+    scripts/build-wasm.sh
 
 # Format all Rust source in the workspace.
 fmt:

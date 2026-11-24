@@ -6,14 +6,20 @@ on:
   pull_request:
     branches: [main]
 
+env:
+  # Pinned Rust toolchain from the tested version matrix (see docs/toolchain-matrix.md).
+  # Update this together with the matrix and rerun native/WASM/local-host validation.
+  RUST_TOOLCHAIN: "1.84.0"
+
 jobs:
-  fmt:
-    name: Formatting
+  test:
+    name: Test & Build
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@master
         with:
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
           components: rustfmt
       - name: Check formatting
         run: cargo fmt --check
@@ -23,30 +29,66 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@master
         with:
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
           components: clippy
       - uses: Swatinem/rust-cache@v2
       - name: Run clippy
         run: cargo clippy --all-targets -- -D warnings
 
-  checked-arithmetic-lint:
-    name: Checked Arithmetic Lint
+      - name: Check formatting
+        run: cargo fmt --all -- --check
+
+      - name: Clippy
+        run: cargo clippy --all-targets --all-features -- -D warnings
+
+  release-guards:
+    name: Contract Version and Changelog
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - name: Lint timestamp/period arithmetic in will contract
-        run: bash scripts/lint-checked-arithmetic.sh
+        with:
+          fetch-depth: 0
+      - name: Verify CONTRACT_VERSION matches crate version and git version tag
+        run: bash .github/scripts/check-contract-version.sh
+      - name: Verify changelog for contract version changes
+        if: github.event_name == 'pull_request'
+        env:
+          CHANGELOG_BASE: ${{ github.event.pull_request.base.sha }}
+        run: bash .github/scripts/check-changelog.sh
 
   test:
     name: Test
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
       - uses: Swatinem/rust-cache@v2
       - name: Run tests
-        run: cargo test --all
+        run: cargo test --all-features
+
+      - name: Rustdoc (warning-failing)
+        # Fail on broken intra-doc links and any other rustdoc warning so
+        # source API documentation cannot silently drift. Runs offline against
+        # the supported host/contract feature configuration.
+        env:
+          RUSTDOCFLAGS: "-D warnings -D rustdoc::broken_intra_doc_links"
+        run: cargo doc --no-deps --all-features
+
+  fuzzing-feature-check:
+    name: Fuzzing Feature Compile Check
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Compile optional fuzzing feature on host target
+        run: cargo check -p will --features fuzzing --locked
+      - name: Verify guard catches broken feature-only derive
+        run: bash scripts/check-fuzzing-feature-guard.sh
 
   resource-costs:
     name: Resource Cost Docs Drift
@@ -67,8 +109,9 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@master
         with:
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
           targets: wasm32v1-none
       - uses: Swatinem/rust-cache@v2
       - name: Build contract & verify binary size

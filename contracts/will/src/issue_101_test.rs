@@ -3,7 +3,7 @@
 use crate::storage::{
     recompute_protocol_stats_chunk, DataKey, ProtocolStats, MAX_CHUNK_SIZE,
 };
-use crate::{WillContract, WillContractClient};
+use crate::{Allocation, Beneficiary, WillContract, WillContractClient, MIN_CHECKIN_INTERVAL};
 use soroban_sdk::{
     testutils::{Address as _, Ledger},
     Address, Env, Vec,
