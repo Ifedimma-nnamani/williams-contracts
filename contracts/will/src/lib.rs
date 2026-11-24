@@ -4745,16 +4745,20 @@ impl WillContract {
         // authorized caller. Checking the pair first means a caller who owns
         // only one of the two ids learns nothing about the other will beyond
         // "not yours", and can never fold their will into someone else's.
-        let will_a = load_will(&env, will_id_a);
-        let will_b = load_will(&env, will_id_b);
+        //
+        // Each source is loaded exactly once (#251): the owned records read
+        // here are the ones mutated below, so the merge does not pay a second
+        // full-Will decode of potentially large records. Soroban execution is
+        // single-invocation atomic, so nothing can mutate the records between
+        // this read and the writes at the end of the function.
+        let mut will_a = load_owned(&env, will_id_a, &owner);
+        let mut will_b = load_owned(&env, will_id_b, &owner);
         if will_a.owner != will_b.owner {
             panic_with_error!(&env, WillError::NotSameOwner);
         }
         if will_a.owner != owner {
             panic_with_error!(&env, WillError::NotOwner);
         }
-        let mut will_a = load_owned(&env, will_id_a, &owner);
-        let mut will_b = load_will(&env, will_id_b);
         if will_b.owner != owner {
             panic_with_error!(&env, WillError::NotSameOwner);
         }
