@@ -31,7 +31,7 @@ const SECONDS_PER_DAY: u64 = 86_400;
 /// Minimum number of days a guardian vote stays live, regardless of how short
 /// the will's grace period is. This guarantees a coordination window of at
 /// least two weeks for distributed guardians (#96).
-pub(crate) const MIN_GUARDIAN_VOTE_EXPIRY_DAYS: u32 = 14;
+pub(crate) const MIN_GUARDIAN_VOTE_EXPIRY_DAYS: u64 = 14;
 
 /// Normalises a ledger timestamp to the 1-second granularity that guardian
 /// votes are stored with. Soroban reports `timestamp()` in seconds, so this is
@@ -47,7 +47,7 @@ fn to_vote_seconds(timestamp: u64) -> u64 {
 /// Uses `max(grace_period_days, MIN_GUARDIAN_VOTE_EXPIRY_DAYS)` so that short
 /// grace periods (e.g. 3 days) still yield a coordination-friendly window,
 /// while longer grace periods keep their existing longevity.
-pub(crate) fn guardian_vote_expiry_days(will: &Will) -> u32 {
+pub(crate) fn guardian_vote_expiry_days(will: &Will) -> u64 {
     if will.grace_period_days < MIN_GUARDIAN_VOTE_EXPIRY_DAYS {
         MIN_GUARDIAN_VOTE_EXPIRY_DAYS
     } else {
@@ -66,6 +66,9 @@ pub(crate) fn guardian_vote_expiry_days(will: &Will) -> u32 {
 /// treated as belonging to the same vote window.
 pub(crate) fn live_guardian_vote_weight(env: &Env, will_id: u64, will: &Will, now: u64) -> u32 {
     let now = to_vote_seconds(now);
+    // Bind the effective window once; storage expects the same u64 day unit
+    // used by `grace_period_days` and the ledger timestamp (issue #183).
+    let expiry_days = guardian_vote_expiry_days(will);
     let _grace_seconds = will.grace_period_days.saturating_mul(SECONDS_PER_DAY);
     let mut total: u32 = 0;
     for g in will.guardians.iter() {
@@ -79,6 +82,44 @@ pub(crate) fn live_guardian_vote_weight(env: &Env, will_id: u64, will: &Will, no
 #[cfg(test)]
 mod tests {
     use super::*;
+    use soroban_sdk::{
+        testutils::Address as _, token::StellarAssetClient, vec, Address, Env,
+    };
+
+    use crate::{Allocation, Beneficiary, WillContract, WillContractClient};
+
+    /// Env-backed fixture: `Will` has no `Default` and contains arena-bound
+    /// types, so tests must build a real will through the contract client.
+    fn will_with_grace_period(grace_days: u64) -> Will {
+        let env = Env::default();
+        env.mock_all_auths();
+        let owner = Address::generate(&env);
+        let token_admin = Address::generate(&env);
+        let token = env
+            .register_stellar_asset_contract_v2(token_admin.clone())
+            .address();
+        StellarAssetClient::new(&env, &token).mint(&owner, 1_000_000);
+        let contract_id = env.register(WillContract, ());
+        let client = WillContractClient::new(&env, &contract_id);
+        let id = client.create_will(
+            &owner,
+            &vec![&env, (token, 1_000_000_i128)],
+            &vec![
+                &env,
+                Beneficiary {
+                    address: Address::generate(&env),
+                    allocation: Allocation::Percentage(10_000),
+                },
+            ],
+            &90,
+            &grace_days,
+            &vec![&env],
+            &0,
+            &None,
+            &0,
+        );
+        client.get_will(&id)
+    }
 
     #[test]
     fn vote_seconds_keeps_second_granularity() {
@@ -120,10 +161,7 @@ mod tests {
     fn short_grace_period_is_floored_to_minimum_window() {
         // A 3-day grace period must still yield the coordination-friendly
         // minimum window so votes cast days apart remain live (#96).
-        let will = Will {
-            grace_period_days: 3,
-            ..Will::default()
-        };
+        let will = will_with_grace_period(3);
         assert_eq!(guardian_vote_expiry_days(&will), MIN_GUARDIAN_VOTE_EXPIRY_DAYS);
         assert!(guardian_vote_expiry_days(&will) >= 7);
     }
@@ -131,10 +169,7 @@ mod tests {
     #[test]
     fn long_grace_period_is_preserved() {
         // Longer grace periods keep their existing longevity.
-        let will = Will {
-            grace_period_days: 30,
-            ..Will::default()
-        };
+        let will = will_with_grace_period(30);
         assert_eq!(guardian_vote_expiry_days(&will), 30);
     }
 
@@ -143,10 +178,7 @@ mod tests {
         // Simulate two guardians voting 5 days apart under a 3-day grace
         // period. With the old fixed window the first vote would have lapsed;
         // the floored window keeps both votes live so quorum can be reached.
-        let will = Will {
-            grace_period_days: 3,
-            ..Will::default()
-        };
+        let will = will_with_grace_period(3);
         let expiry_days = guardian_vote_expiry_days(&will);
         let expiry_seconds = (expiry_days as u64).saturating_mul(SECONDS_PER_DAY);
 
@@ -163,5 +195,15 @@ mod tests {
         // Once the window elapses the first vote drops out cleanly.
         let after_expiry = first_vote_at + expiry_seconds;
         assert!(!(after_expiry < first_vote_at + expiry_seconds));
+    }
+
+    #[test]
+    fn large_u64_grace_period_is_not_truncated() {
+        // The effective window uses a single u64 day type all the way to
+        // storage; a very large persisted period must survive unchanged
+        // instead of wrapping through a u32 conversion (issue #183).
+        let mut will = will_with_grace_period(7);
+        will.grace_period_days = u64::MAX;
+        assert_eq!(guardian_vote_expiry_days(&will), u64::MAX);
     }
 }

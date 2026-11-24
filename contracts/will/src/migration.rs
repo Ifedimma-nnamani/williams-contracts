@@ -53,7 +53,7 @@ use crate::types::Will;
 ///
 /// Keep in sync with [`crate::storage::CURRENT_SCHEMA_VERSION`]; the two are
 /// asserted equal at compile time in `migrate_will_test.rs`.
-pub const CURRENT_SCHEMA_VERSION: u32 = 2;
+pub const CURRENT_SCHEMA_VERSION: u32 = 3;
 
 /// `true` when this build is a pre-release (release candidate) of the
 /// contract, `false` for a final build. See the module docs for how this
@@ -75,7 +75,11 @@ pub const fn encode_version(major: u32, minor: u32, patch: u32) -> u32 {
 
 /// Splits a packed version back into `(major, minor, patch)`.
 pub const fn decode_version(version: u32) -> (u32, u32, u32) {
-    (version / 1_000_000, (version / 1_000) % 1_000, version % 1_000)
+    (
+        version / 1_000_000,
+        (version / 1_000) % 1_000,
+        version % 1_000,
+    )
 }
 
 /// Legacy `Will` layouts, frozen at the version their successor replaced.
@@ -126,6 +130,78 @@ pub mod legacy {
         pub delegate: Option<Address>,
     }
 
+    /// The `Will` layout as of schema version 2: it added
+    /// `keeper_bounty_token` (#109) and regrouped fields (#117), but predates
+    /// `grace_extension_days` (#102). An entry written by that release matches
+    /// neither the current `Will` nor `WillV1`, so it must be frozen here
+    /// verbatim (issue #176).
+    #[contracttype]
+    #[derive(Clone, Debug, Eq, PartialEq)]
+    pub struct WillV2 {
+        pub id: u64,
+        pub owner: Address,
+        pub balances: Map<Address, i128>,
+        pub token: Address,
+        pub is_native: bool,
+        pub balance: i128,
+        pub beneficiaries: Vec<Beneficiary>,
+        pub hashed_beneficiaries: Vec<HashedBeneficiary>,
+        pub checkin_period_days: u64,
+        pub grace_period_days: u64,
+        pub last_checkin: u64,
+        pub trigger_time: Option<u64>,
+        pub confirmation_deadline: Option<u64>,
+        pub status: WillStatus,
+        pub guardians: Vec<Guardian>,
+        pub guardian_vote_weight: u32,
+        pub guardian_votes: u32,
+        pub guardian_cancel_vote_weight: u32,
+        pub guardian_cancel_votes: u32,
+        pub guardian_threshold: u32,
+        pub guardian_list_updated_at: u64,
+        pub schema_version: u32,
+        pub keeper_bounty_bps: u32,
+        pub keeper_bounty_token: Option<Address>,
+        pub delegate: Option<Address>,
+    }
+
+    impl WillV2 {
+        /// Lifts a prior-v2 entry into the current shape. Only
+        /// `grace_extension_days` was added in schema v3, so it defaults to
+        /// zero (no extension granted under the old contract) while the
+        /// original `schema_version` is preserved for the upgrade step.
+        pub fn into_current(self) -> Will {
+            Will {
+                id: self.id,
+                owner: self.owner,
+                balances: self.balances,
+                token: self.token,
+                is_native: self.is_native,
+                balance: self.balance,
+                beneficiaries: self.beneficiaries,
+                hashed_beneficiaries: self.hashed_beneficiaries,
+                checkin_period_days: self.checkin_period_days,
+                grace_period_days: self.grace_period_days,
+                last_checkin: self.last_checkin,
+                trigger_time: self.trigger_time,
+                confirmation_deadline: self.confirmation_deadline,
+                status: self.status,
+                guardians: self.guardians,
+                guardian_vote_weight: self.guardian_vote_weight,
+                guardian_votes: self.guardian_votes,
+                guardian_cancel_vote_weight: self.guardian_cancel_vote_weight,
+                guardian_cancel_votes: self.guardian_cancel_votes,
+                guardian_threshold: self.guardian_threshold,
+                guardian_list_updated_at: self.guardian_list_updated_at,
+                grace_extension_days: 0,
+                schema_version: self.schema_version,
+                keeper_bounty_bps: self.keeper_bounty_bps,
+                keeper_bounty_token: self.keeper_bounty_token,
+                delegate: self.delegate,
+            }
+        }
+    }
+
     impl WillV1 {
         /// Lifts a v1 entry into the current `Will` shape. The field v2 added
         /// defaults to `None` — the proportional keeper-bounty split (#109) —
@@ -144,6 +220,9 @@ pub mod legacy {
                 checkin_period_days: self.checkin_period_days,
                 grace_period_days: self.grace_period_days,
                 last_checkin: self.last_checkin,
+                // Legacy records predate the re-trigger cooldown; 0 keeps
+                // them immediately triggerable (#174).
+                trigger_cooldown_until: 0,
                 trigger_time: self.trigger_time,
                 confirmation_deadline: self.confirmation_deadline,
                 status: self.status,
@@ -177,7 +256,11 @@ pub fn decode_will(env: &Env, raw: &Val) -> Result<Will, WillError> {
         return Ok(will);
     }
 
-    // Legacy layouts are tried here, newest first.
+    // Legacy layouts are tried here, newest first. The prior v2 entry has
+    // `keeper_bounty_token` but no `grace_extension_days` (issue #176).
+    if let Ok(old) = legacy::WillV2::try_from_val(env, raw) {
+        return Ok(old.into_current());
+    }
     if let Ok(old) = legacy::WillV1::try_from_val(env, raw) {
         return Ok(old.into_current());
     }
@@ -186,13 +269,19 @@ pub fn decode_will(env: &Env, raw: &Val) -> Result<Will, WillError> {
 }
 
 /// Runs every migration step between `will.schema_version` and
-/// [`CURRENT_SCHEMA_VERSION`], in order. A will already at (or beyond) the
-/// current version is returned unchanged.
+/// [`CURRENT_SCHEMA_VERSION`], in order. A will already at the current version
+/// is returned unchanged. A will written by a newer build (e.g. read after a
+/// contract rollback) panics with [`WillError::FutureSchemaVersion`] rather
+/// than being silently treated as current (#129).
 pub fn upgrade(env: &Env, mut will: Will) -> Will {
+    if will.schema_version > CURRENT_SCHEMA_VERSION {
+        soroban_sdk::panic_with_error!(env, WillError::FutureSchemaVersion);
+    }
     while will.schema_version < CURRENT_SCHEMA_VERSION {
         will = match will.schema_version {
             0 => migrate_v0_to_v1(env, will),
             1 => migrate_v1_to_v2(env, will),
+            2 => migrate_v2_to_v3(env, will),
             // Every version below CURRENT_SCHEMA_VERSION must have a step.
             _ => soroban_sdk::panic_with_error!(env, WillError::UnsupportedSchemaVersion),
         };
@@ -217,9 +306,112 @@ fn migrate_v1_to_v2(_env: &Env, mut will: Will) -> Will {
     will
 }
 
+/// v2 → v3: v3 added `Will::grace_extension_days` (#102). `decode_will` has
+/// already lifted the prior-v2 entry into the current shape with the new
+/// field defaulted to zero, so this step only stamps the new version (issue
+/// #176).
+fn migrate_v2_to_v3(_env: &Env, mut will: Will) -> Will {
+    will.schema_version = 3;
+    will
+}
+
 #[cfg(test)]
 mod version_tests {
     use super::*;
+    use soroban_sdk::{
+        testutils::Address as _, vec, Address, IntoVal, Map,
+    };
+
+    use crate::types::{Allocation, Beneficiary, WillStatus};
+
+    fn prior_v2(env: &Env, status: WillStatus) -> legacy::WillV2 {
+        let owner = Address::generate(env);
+        let token = Address::generate(env);
+        let heir = Address::generate(env);
+        let mut balances = Map::new(env);
+        balances.set(token.clone(), 100_i128);
+        legacy::WillV2 {
+            id: 7,
+            owner,
+            balances,
+            token: token.clone(),
+            is_native: false,
+            balance: 100,
+            beneficiaries: vec![
+                env,
+                Beneficiary {
+                    address: heir,
+                    allocation: Allocation::Percentage(10_000),
+                },
+            ],
+            hashed_beneficiaries: vec![env],
+            checkin_period_days: 90,
+            grace_period_days: 7,
+            last_checkin: 1_000,
+            trigger_time: None,
+            confirmation_deadline: None,
+            status,
+            guardians: vec![env],
+            guardian_vote_weight: 0,
+            guardian_votes: 0,
+            guardian_cancel_vote_weight: 0,
+            guardian_cancel_votes: 0,
+            guardian_threshold: 0,
+            guardian_list_updated_at: 500,
+            schema_version: 2,
+            keeper_bounty_bps: 10,
+            keeper_bounty_token: Some(token),
+            delegate: None,
+        }
+    }
+
+    #[test]
+    fn prior_v2_active_record_decodes_and_preserves_every_field() {
+        // Issue #176: the exact prior-v2 field set must decode even though it
+        // lacks `grace_extension_days`.
+        let env = Env::default();
+        let old = prior_v2(&env, WillStatus::Active);
+        let raw: Val = old.clone().into_val(&env);
+        let decoded = decode_will(&env, &raw).expect("prior v2 entry must decode");
+
+        assert_eq!(decoded.id, old.id);
+        assert_eq!(decoded.owner, old.owner);
+        assert_eq!(decoded.balance, old.balance);
+        assert_eq!(decoded.beneficiaries, old.beneficiaries);
+        assert_eq!(decoded.hashed_beneficiaries, old.hashed_beneficiaries);
+        assert_eq!(decoded.checkin_period_days, old.checkin_period_days);
+        assert_eq!(decoded.grace_period_days, old.grace_period_days);
+        assert_eq!(decoded.last_checkin, old.last_checkin);
+        assert_eq!(decoded.guardians, old.guardians);
+        assert_eq!(decoded.guardian_threshold, old.guardian_threshold);
+        assert_eq!(decoded.keeper_bounty_bps, old.keeper_bounty_bps);
+        assert_eq!(decoded.keeper_bounty_token, old.keeper_bounty_token);
+        assert_eq!(decoded.delegate, old.delegate);
+        assert_eq!(decoded.grace_extension_days, 0);
+        assert_eq!(decoded.schema_version, 2);
+    }
+
+    #[test]
+    fn prior_v2_archived_record_decodes() {
+        let env = Env::default();
+        let old = prior_v2(&env, WillStatus::Settled);
+        let raw: Val = old.into_val(&env);
+        let decoded = decode_will(&env, &raw).expect("archived prior-v2 entry must decode");
+        assert_eq!(decoded.status, WillStatus::Settled);
+        assert_eq!(decoded.grace_extension_days, 0);
+    }
+
+    #[test]
+    fn prior_v2_record_upgrades_to_schema_v3() {
+        let env = Env::default();
+        let old = prior_v2(&env, WillStatus::Active);
+        let raw: Val = old.clone().into_val(&env);
+        let decoded = decode_will(&env, &raw).unwrap();
+        let migrated = upgrade(&env, decoded);
+        assert_eq!(migrated.schema_version, CURRENT_SCHEMA_VERSION);
+        assert_eq!(migrated.grace_extension_days, 0);
+        assert_eq!(migrated.keeper_bounty_token, old.keeper_bounty_token);
+    }
 
     #[test]
     fn encode_decode_roundtrip() {

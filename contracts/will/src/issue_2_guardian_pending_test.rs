@@ -106,6 +106,33 @@ fn guardian_quorum_cancels_pending_will_after_deadline() {
     let (will_id, guardian_a, guardian_b) =
         create_pending_with_guardians(&env, &client, &owner, &token_address, 30);
 
+    let pending = WillStatus::PendingConfirmation;
+    let beneficiary = client
+        .get_will(&will_id)
+        .beneficiaries
+        .first()
+        .unwrap()
+        .address;
+    let assert_indexes = |expected_ids| {
+        let ids = env.as_contract(&client.address, || {
+            crate::storage::get_owner_status_wills(&env, &owner, pending)
+        });
+        assert_eq!(ids, expected_ids);
+
+        let status_wills = client.get_wills_by_owner_and_status(&owner, &pending, &None, &10);
+        let status_page = client.get_owner_status_page(&owner, &pending, &None, &10);
+        assert_eq!(status_page.total_count, ids.len());
+        for wills in [
+            status_wills,
+            status_page.wills,
+            client.get_wills_by_owner(&owner, &None, &10),
+            client.get_wills_by_beneficiary(&beneficiary, &None, &10),
+        ] {
+            assert!(wills.iter().map(|will| will.id).eq(ids.iter()));
+        }
+    };
+    assert_indexes(vec![&env, will_id]);
+
     // Owner's balance is reduced by the deposit.
     assert_eq!(token.balance(&owner), initial_balance - deposit);
     assert_eq!(
@@ -126,6 +153,8 @@ fn guardian_quorum_cancels_pending_will_after_deadline() {
         "will must still be PendingConfirmation after one vote below quorum"
     );
 
+    assert_indexes(vec![&env, will_id]);
+
     // Second guardian reaches quorum — will is cancelled and funds refunded.
     client.guardian_cancel_pending_will(&will_id, &guardian_b);
 
@@ -136,6 +165,8 @@ fn guardian_quorum_cancels_pending_will_after_deadline() {
         "will must be Cancelled once guardian quorum is reached"
     );
     assert_eq!(will.balance, 0, "cancelled will must have zero balance");
+
+    assert_indexes(vec![&env]);
 
     // Tokens returned to owner.
     assert_eq!(

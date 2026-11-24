@@ -2,7 +2,7 @@
 
 Every failure mode in the `will` contract is surfaced as a typed
 `WillError` variant encoded as a `ContractError(u32)` in Soroban transaction
-simulation and XDR results. This reference lists all discriminants 1–53 in
+simulation and XDR results. This reference lists all discriminants 1–60 in
 numerical order so SDK maintainers and Drips ecosystem contributors can decode
 raw error codes without inspecting source.
 
@@ -69,6 +69,8 @@ available discriminant; existing values are never changed.
 | 57 | `NotAuthorized` | `redirect_failed_payout` was called by an address that is neither the recorded failed-payout recipient nor the will's owner. |
 | 58 | `UnclaimedHashedBeneficiary` | `archive_will` was called on a `Released` will that still has unclaimed hashed beneficiary shares. Archiving would destroy the will entry that `reveal_and_claim` needs to verify the commitment, permanently trapping those reserved funds. |
 | 59 | `BalanceOverflow` | A balance or total accumulation (locked value, owner statistics, merge balances, split duplicate-token totals) would not be representable as `i128`. Returned as a typed error instead of a host arithmetic trap; the rejected operation leaves custody and index state unchanged. |
+| 60 | `NoFailedRefund` | `retry_failed_refund` was called for a token with no recorded deferred owner refund. |
+| 61 | `RefundNotDeferred` | `retry_failed_refund` was called for a token whose owner refund was already delivered, so there is nothing left to recover. |
 
 ## Notes
 
@@ -77,6 +79,11 @@ available discriminant; existing values are never changed.
   serialized on-chain data).
 - Codes are stable across contract upgrades. If a variant is ever retired, its
   discriminant is kept reserved rather than reused.
+- Owner refunds during `cancel_will`, `refund_unconfirmed_will` and
+  `guardian_cancel_pending_will` isolate per-token transfer failures: a token
+  that refuses delivery records a deferred refund (see `NoFailedRefund` /
+  `RefundNotDeferred`) instead of reverting the whole cancellation, and the
+  deferred amount is recoverable exactly once via `retry_failed_refund`.
 - Raw Soroban error codes are reported as `ContractError(u32)` in transaction
   simulation results and XDR `ScError` values. Match against the numeric code
   above to identify the variant.

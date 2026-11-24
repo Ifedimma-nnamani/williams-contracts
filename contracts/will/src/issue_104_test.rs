@@ -17,10 +17,6 @@ use crate::{
 
 const DAY: u64 = 86_400;
 
-fn advance(env: &Env, days: u64) {
-    env.ledger().with_mut(|l| l.timestamp += days * DAY);
-}
-
 fn setup(env: &Env) -> (WillContractClient<'_>, Address, Address) {
     let owner = Address::generate(env);
     let sac = env.register_stellar_asset_contract_v2(owner.clone());
@@ -71,7 +67,6 @@ fn emergency_checkin_grants_cooldown_blocking_retrigger() {
     env.mock_all_auths();
     env.ledger().set_timestamp(1_700_000_000);
 
-    let owner = Address::generate(&env);
     let heir = Address::generate(&env);
     let (client, owner, token_address) = setup(&env);
     let will_id = create_will(&env, &client, &owner, &token_address, &heir);
@@ -102,26 +97,27 @@ fn cooldown_expires_after_24_hours() {
     env.mock_all_auths();
     env.ledger().set_timestamp(1_700_000_000);
 
-    let owner = Address::generate(&env);
     let heir = Address::generate(&env);
     let (client, owner, token_address) = setup(&env);
     let will_id = create_will(&env, &client, &owner, &token_address, &heir);
 
     trigger_will(&env, &client, will_id);
+    let checkin_at = env.ledger().timestamp();
     client.emergency_checkin(&will_id, &owner);
 
-    // Advance exactly 24 hours (the cooldown). `trigger_will` should still be
-    // blocked at the boundary since `now < cooldown_until`.
-    advance(&env, 1);
-    let err = client.try_trigger_will(&will_id).unwrap_err().unwrap();
+    // Make the inactivity deadline due independently of the cooldown.
+    env.as_contract(&client.address, || {
+        let mut will = storage::load_will(&env, will_id).unwrap();
+        will.last_checkin -= will.checkin_period_days * DAY;
+        storage::save_will(&env, &will);
+    });
+    env.ledger().with_mut(|ledger| ledger.timestamp += DAY - 1);
     assert_eq!(
-        err,
-        WillError::CheckinNotDue.into(),
-        "trigger_will must still be rejected at the cooldown boundary"
+        client.try_trigger_will(&will_id),
+        Err(Ok(WillError::CheckinNotDue.into()))
     );
 
-    // Advance one more second past the cooldown: trigger should now succeed.
-    env.ledger().with_mut(|l| l.timestamp += 1);
+    env.ledger().with_mut(|ledger| ledger.timestamp += 1);
     client.trigger_will(&will_id);
     assert_eq!(client.get_will(&will_id).status, WillStatus::Triggered);
 }
@@ -132,7 +128,6 @@ fn emergency_checkin_resets_checkin_deadline() {
     env.mock_all_auths();
     env.ledger().set_timestamp(1_700_000_000);
 
-    let owner = Address::generate(&env);
     let heir = Address::generate(&env);
     let (client, owner, token_address) = setup(&env);
     let will_id = create_will(&env, &client, &owner, &token_address, &heir);

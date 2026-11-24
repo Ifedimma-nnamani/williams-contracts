@@ -383,4 +383,14 @@ pub enum WillError {
     /// The update is rejected atomically *before* any external transfer, so
     /// custody, mirrors and index state are left exactly as they were.
     BalanceOverflow = 59,
+    /// `retry_owner_refund` was called for a `(will_id, token)` pair with no
+    /// recorded deferred owner refund — either the token was never deferred
+    /// (it transferred successfully during cancellation), it was already
+    /// recovered, or the will is not in a cancelled/refunded state (#213).
+    ///
+    /// Owner refunds now use the same deferred-delivery model as beneficiary
+    /// payouts: a token that refuses transfer during `cancel_will`,
+    /// `refund_unconfirmed_will` or `guardian_cancel_pending_will` is recorded
+    /// as a recoverable liability instead of rolling back the whole refund.
+    NoDeferredOwnerRefund = 60,
 }
