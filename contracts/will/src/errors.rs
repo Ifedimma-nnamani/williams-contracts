@@ -371,4 +371,16 @@ pub enum WillError {
     /// will entry that `reveal_and_claim` uses to verify the commitment,
     /// permanently trapping those reserved funds in the contract (#1).
     UnclaimedHashedBeneficiary = 58,
+    /// A balance or aggregate total could not be represented as an `i128`.
+    ///
+    /// Two individually representable amounts need not have a representable
+    /// sum, so every monetary accumulation (locked-value adjustments, owner
+    /// statistics, merge balance sums, split duplicate-token accumulation,
+    /// ...) goes through a shared checked-add helper that returns this error
+    /// instead of letting the host abort with an opaque arithmetic trap
+    /// (#246).
+    ///
+    /// The update is rejected atomically *before* any external transfer, so
+    /// custody, mirrors and index state are left exactly as they were.
+    BalanceOverflow = 59,
 }

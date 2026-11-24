@@ -8,11 +8,13 @@ name: Scripts Check
 # deployment logic an actual end-to-end smoke test rather than just a
 # syntax check.
 #
-# The integration-test job that used to run integration_test.sh end-to-end
-# against a local Soroban network was removed: it depended on installing
-# stellar-cli with `--features opt`, a feature that no longer exists on the
-# stellar-cli version CI installs, so the job could never succeed regardless
-# of anything in this repo.
+# Issue #249: the lifecycle-integration job runs scripts/integration_test.sh
+# end-to-end against an isolated local network.  It is independent of the
+# deploy-sandbox and spec-freshness jobs and does not rely on the removed
+# `--features opt` stellar-cli install; it reuses the same pinned toolchain
+# (wasm32v1-none target + `cargo install --locked stellar-cli`) as the other
+# jobs and performs bounded cleanup so a failing create/check-in/cancel stage
+# is diagnosable from the logs.
 
 on:
   push:
@@ -68,6 +70,62 @@ jobs:
 
       - name: Run deploy sandbox smoke-test
         run: scripts/run-deploy-sandbox.sh
+
+  # Issue #249: actually execute the compiled lifecycle script
+  # (create → check-in → cancel) against an isolated local network.  A nonzero
+  # exit status from the script fails the job, so CLI encoding and real-host
+  # lifecycle regressions are caught by ordinary PR validation.
+  lifecycle-integration:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust wasm32v1-none target
+        run: rustup target add wasm32v1-none
+
+      - name: Cache Rust build artifacts
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: ${{ runner.os }}-cargo-
+
+      - name: Install stellar-cli
+        run: cargo install --locked stellar-cli
+
+      - name: Run lifecycle integration script
+        # `set -o pipefail` propagates the script's nonzero status through the
+        # `tee` used to capture logs; `set -e` aborts on that failure.  Each
+        # lifecycle stage is echoed so a failing create/check-in/cancel step is
+        # identifiable in the captured log.
+        run: |
+          set -euo pipefail
+          echo "::group::lifecycle: create_will"
+          echo "Running scripts/integration_test.sh (create → check-in → cancel)"
+          scripts/integration_test.sh 2>&1 | tee integration-test.log
+          echo "::endgroup::"
+          echo "lifecycle integration script completed successfully"
+
+      - name: Upload lifecycle logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: lifecycle-integration-logs
+          path: integration-test.log
+          if-no-files-found: ignore
+          retention-days: 7
+
+      - name: Cleanup local network
+        if: always()
+        # Bounded cleanup: stop any local stellar/soroban network the script
+        # started, ignoring errors so cleanup never masks the real failure.
+        run: |
+          timeout 60 stellar network stop local 2>/dev/null || true
+          timeout 60 docker ps -q --filter "label=stellar" | xargs -r docker stop 2>/dev/null || true
 
   spec-freshness:
     # Runs scripts/export-spec.sh --check to verify that the committed JSON

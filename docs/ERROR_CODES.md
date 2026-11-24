@@ -68,6 +68,7 @@ available discriminant; existing values are never changed.
 | 56 | `InvalidBountyToken` | `set_keeper_bounty_token` named a token the will does not currently hold. |
 | 57 | `NotAuthorized` | `redirect_failed_payout` was called by an address that is neither the recorded failed-payout recipient nor the will's owner. |
 | 58 | `UnclaimedHashedBeneficiary` | `archive_will` was called on a `Released` will that still has unclaimed hashed beneficiary shares. Archiving would destroy the will entry that `reveal_and_claim` needs to verify the commitment, permanently trapping those reserved funds. |
+| 59 | `BalanceOverflow` | A balance or total accumulation (locked value, owner statistics, merge balances, split duplicate-token totals) would not be representable as `i128`. Returned as a typed error instead of a host arithmetic trap; the rejected operation leaves custody and index state unchanged. |
 
 ## Notes
 
