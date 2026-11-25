@@ -32,6 +32,15 @@ on:
   pull_request:
     branches: [main]
 
+# Issue #253: rapid PR updates should supersede older validation runs for the
+# same pull request instead of spending runners on obsolete revisions.  The
+# group is scoped per workflow and per PR number, so unrelated PRs never
+# cancel each other.  Main-branch pushes use a separate, non-cancelling group
+# so a merge never aborts an in-flight validation of main.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event_name == 'pull_request' && format('pr-{0}', github.event.pull_request.number) || format('ref-{0}', github.ref) }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 # Least‑privilege permissions: only read access to the repository.
 permissions:
   contents: read
