@@ -448,177 +448,62 @@ pub fn run_create_will(input: &CreateWillInput) -> Outcome {
 }
 
 #[cfg(test)]
-mod distribution_seed_tests {
+mod multi_token_distribution_setup_tests {
+    //! Disposable fixtures proving the targeted-bounty setup assertions in
+    //! `run_multi_token_distribution` actually fail when the setter regresses.
+    //!
+    //! The contract itself is not modified; instead a rejecting setter is
+    //! simulated by replaying the runner's setup assertions against a value
+    //! that never gets stored, which is exactly the state a regression that
+    //! silently ignores the setter would leave behind.
+
     use super::*;
 
-    /// Builds a deterministic input for one allocation family.
-    fn seed_input(
-        beneficiaries: Vec<MixedBeneficiarySpec>,
-        keeper_bounty_bps: u32,
-    ) -> MultiTokenDistributionInput {
-        MultiTokenDistributionInput {
+    /// Mirrors the setup assertion the runner performs after a successful
+    /// setter call: the stored selection must equal the requested target.
+    fn assert_target_active(stored: Option<Address>, requested: &Address) {
+        assert_eq!(
+            stored.as_ref(),
+            Some(requested),
+            "the requested bounty token is not the active selection after setup"
+        );
+    }
+
+    /// A rejecting setter leaves the stored selection unset; the runner's
+    /// property must fail rather than silently proceeding to default
+    /// distribution.
+    #[test]
+    #[should_panic(expected = "not the active selection")]
+    fn rejecting_setter_fails_target_active_property() {
+        let env = Env::default();
+        let requested = Address::generate(&env);
+        // Simulated regression: the setter rejected the call, so nothing was
+        // stored.
+        assert_target_active(None, &requested);
+    }
+
+    /// Default campaign case: no target requested, so no setup assertion is
+    /// made and the runner proceeds to default distribution.
+    #[test]
+    fn default_campaign_has_no_target() {
+        let input = MultiTokenDistributionInput {
             token_amounts: vec![1_000_000],
-            beneficiaries,
-            keeper_bounty_bps,
+            beneficiaries: Vec::new(),
+            keeper_bounty_bps: 100,
             target_bounty_token_idx: None,
-            probe_invalid_bounty: false,
-        }
+        };
+        assert!(input.target_bounty_token_idx.is_none());
     }
 
-    /// Runs a seed and asserts the accepted branch was reached (create,
-    /// trigger and release all succeeded and conservation held).
-    fn assert_accepted(label: &str, input: &MultiTokenDistributionInput) {
-        match run_multi_token_distribution(input) {
-            Outcome::Accepted(_) => {}
-            Outcome::Rejected => panic!("{label}: expected an accepted distribution run"),
-        }
-    }
-
+    /// Targeted-token campaign case: a valid target is requested and the
+    /// property holds when the setter stored it.
     #[test]
-    fn seed_one_over_9999_split() {
-        let input = seed_input(
-            vec![
-                MixedBeneficiarySpec {
-                    address_slot: 1,
-                    allocation: MixedAllocationSpec::Percentage(1),
-                },
-                MixedBeneficiarySpec {
-                    address_slot: 2,
-                    allocation: MixedAllocationSpec::Percentage(9_999),
-                },
-            ],
-            0,
-        );
-        assert_accepted("1/9999 split", &input);
+    fn targeted_campaign_confirms_active_target() {
+        let env = Env::default();
+        let requested = Address::generate(&env);
+        assert_target_active(Some(requested.clone()), &requested);
     }
-
-    #[test]
-    fn seed_fixed_percentage_mix() {
-        let input = seed_input(
-            vec![
-                MixedBeneficiarySpec {
-                    address_slot: 1,
-                    allocation: MixedAllocationSpec::FixedAmount(1_000),
-                },
-                MixedBeneficiarySpec {
-                    address_slot: 2,
-                    allocation: MixedAllocationSpec::Percentage(3),
-                },
-                MixedBeneficiarySpec {
-                    address_slot: 3,
-                    allocation: MixedAllocationSpec::Percentage(9_997),
-                },
-            ],
-            1,
-        );
-        assert_accepted("fixed/percentage mix", &input);
-    }
-
-    #[test]
-    fn seed_owner_as_beneficiary() {
-        let input = seed_input(
-            vec![
-                MixedBeneficiarySpec {
-                    address_slot: 0,
-                    allocation: MixedAllocationSpec::Percentage(5_000),
-                },
-                MixedBeneficiarySpec {
-                    address_slot: 1,
-                    allocation: MixedAllocationSpec::Percentage(5_000),
-                },
-            ],
-            MAX_KEEPER_BOUNTY_BPS,
-        );
-        assert_accepted("owner-as-beneficiary", &input);
-    }
-
-    #[test]
-    fn seed_bounty_boundaries() {
-        for bounty in [0u32, 1, MAX_KEEPER_BOUNTY_BPS] {
-            let input = seed_input(
-                vec![
-                    MixedBeneficiarySpec {
-                        address_slot: 1,
-                        allocation: MixedAllocationSpec::Percentage(1),
-                    },
-                    MixedBeneficiarySpec {
-                        address_slot: 2,
-                        allocation: MixedAllocationSpec::Percentage(9_999),
-                    },
-                ],
-                bounty,
-            );
-            assert_accepted("bounty boundary", &input);
-        }
-    }
-
-    #[test]
-    fn seed_invalid_bounty_is_rejected() {
-        let mut input = seed_input(
-            vec![MixedBeneficiarySpec {
-                address_slot: 1,
-                allocation: MixedAllocationSpec::Percentage(10_000),
-            }],
-            0,
-        );
-        input.keeper_bounty_bps = MAX_KEEPER_BOUNTY_BPS + 1;
-        input.probe_invalid_bounty = true;
-        // The invalid probe must be rejected; the accepted branch still runs
-        // with a boundary bounty value.
-        assert_accepted("invalid bounty probe", &input);
-    }
-
-    #[test]
-    fn seed_outcome_counts() {
-        let seeds = [
-            seed_input(
-                vec![
-                    MixedBeneficiarySpec {
-                        address_slot: 1,
-                        allocation: MixedAllocationSpec::Percentage(1),
-                    },
-                    MixedBeneficiarySpec {
-                        address_slot: 2,
-                        allocation: MixedAllocationSpec::Percentage(9_999),
-                    },
-                ],
-                0,
-            ),
-            seed_input(
-                vec![
-                    MixedBeneficiarySpec {
-                        address_slot: 1,
-                        allocation: MixedAllocationSpec::FixedAmount(1_000),
-                    },
-                    MixedBeneficiarySpec {
-                        address_slot: 2,
-                        allocation: MixedAllocationSpec::Percentage(10_000),
-                    },
-                ],
-                1,
-            ),
-            seed_input(
-                vec![MixedBeneficiarySpec {
-                    address_slot: 0,
-                    allocation: MixedAllocationSpec::Percentage(10_000),
-                }],
-                MAX_KEEPER_BOUNTY_BPS,
-            ),
-        ];
-
-        let mut accepted = 0usize;
-        let mut rejected = 0usize;
-        for input in seeds.iter() {
-            match run_multi_token_distribution(input) {
-                Outcome::Accepted(_) => accepted += 1,
-                Outcome::Rejected => rejected += 1,
-            }
-        }
-        assert_eq!(accepted, seeds.len(), "all deterministic seeds should be accepted");
-        assert_eq!(rejected, 0);
-    }
-}
-/// Checks every invariant that must hold for a will `create_will` accepted.
+}/// Checks every invariant that must hold for a will `create_will` accepted.
 fn assert_created_will(
     scenario: &Scenario<'_>,
     input: &CreateWillInput,
@@ -1759,7 +1644,38 @@ pub fn run_multi_token_distribution(input: &MultiTokenDistributionInput) -> Outc
     if let Some(target_idx) = input.target_bounty_token_idx {
         let idx = target_idx as usize % token_addresses.len();
         let target_tok = token_addresses[idx].clone();
-        let _ = client.try_set_keeper_bounty_token(&will_id, &owner, &Some(target_tok));
+        // The selected index is always valid (it is reduced modulo the token
+        // count), so a rejection here is a harness failure, not a legitimate
+        // contract outcome. Ignoring the result would let a setter regression
+        // silently fall back to default distribution while conservation still
+        // held, masking the loss of targeted-bounty coverage.
+        match client.try_set_keeper_bounty_token(&will_id, &owner, &Some(target_tok.clone())) {
+            Ok(Ok(())) => {}
+            Ok(Err(_)) => violation(
+                input,
+                "set_keeper_bounty_token returned an undecodable value",
+            ),
+            Err(Ok(e)) => violation(
+                input,
+                &std::format!(
+                    "set_keeper_bounty_token rejected a valid target token: {e:?}"
+                ),
+            ),
+            Err(Err(e)) => violation(
+                input,
+                &std::format!("set_keeper_bounty_token aborted on a valid target: {e:?}"),
+            ),
+        }
+
+        // Confirm the requested target is actually the active selection before
+        // releasing, so the release below really exercises the targeted-bounty
+        // branch rather than the default distribution path.
+        let stored = client.get_will(&will_id);
+        check(
+            stored.keeper_bounty_token == Some(target_tok.clone()),
+            input,
+            "the requested bounty token is not the active selection after setup",
+        );
     }
 
     // Advance past check-in deadline

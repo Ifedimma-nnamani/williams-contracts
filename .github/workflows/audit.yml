@@ -163,6 +163,10 @@ jobs:
       - name: Install cargo-audit
         run: cargo install --locked cargo-audit
 
+      # Shared warning policy (issue #263): this plain `cargo audit` invocation is
+      # the single source of truth for pass/fail. The justfile `audit` recipe
+      # mirrors this exact command (same config, no `--deny warnings`), while
+      # `just audit-strict` is the optional stricter local mode.
       - name: Run cargo audit
         run: cargo audit --config audit.toml
 
