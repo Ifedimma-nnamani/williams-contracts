@@ -394,19 +394,39 @@ pub fn decrement_active_will_count(env: &Env) {
     }
 }
 
+/// Checked addition for `i128` monetary accumulations (balances, per-token
+/// totals, owner statistics).
+///
+/// Two individually representable `i128` amounts need not have a representable
+/// sum, and release builds enable overflow checks, so a raw `a + b` on
+/// accounting values aborts the whole transaction with an opaque host
+/// arithmetic trap. Every monetary accumulation in the contract routes through
+/// this helper instead, so an unrepresentable sum surfaces as the stable,
+/// documented [`WillError::BalanceOverflow`] error (#246).
+///
+/// Callers must perform the checked add **before** any external transfer or
+/// state write, so a rejected update leaves custody and index state untouched.
+pub fn checked_add_balance(a: i128, b: i128) -> Result<i128, WillError> {
+    a.checked_add(b).ok_or(WillError::BalanceOverflow)
+}
+
 /// Adds or subtracts a token amount from the protocol's locked-balance totals.
 ///
 /// Refactored to operate directly on `DataKey::TotalLocked(Address)` in persistent storage,
 /// eliminating vector scans and instance storage serialization overhead, keeping
 /// per-transaction read/write footprint and gas consumption constant regardless of the
 /// number of distinct tokens used in the protocol.
-pub fn adjust_locked_value(env: &Env, token: &Address, delta: i128) {
+///
+/// The accumulation is checked: an unrepresentable total returns
+/// [`WillError::BalanceOverflow`] before any storage write, so a rejected
+/// adjustment leaves the protocol totals and token index unchanged (#246).
+pub fn adjust_locked_value(env: &Env, token: &Address, delta: i128) -> Result<(), WillError> {
     if delta == 0 {
-        return;
+        return Ok(());
     }
     let key = DataKey::TotalLocked(token.clone());
     let current = get_total_locked(env, token);
-    let next_total = current + delta;
+    let next_total = checked_add_balance(current, delta)?;
     if next_total != 0 {
         env.storage().persistent().set(&key, &next_total);
         env.storage()
@@ -450,18 +470,29 @@ pub fn adjust_locked_value(env: &Env, token: &Address, delta: i128) {
             .instance()
             .set(&DataKey::ProtocolTokens, &updated);
     }
+    Ok(())
 }
 
 /// Applies `sign * amount` to the protocol's locked totals for every entry in
 /// a will's `balances` map. Use `1` when balances enter the contract and `-1`
 /// when they leave it (release, cancellation), so multi-token wills keep the
 /// per-token totals in sync with [`recompute_protocol_stats`].
-pub fn adjust_locked_for_balances(env: &Env, balances: &Map<Address, i128>, sign: i128) {
+///
+/// Returns [`WillError::BalanceOverflow`] if any per-token total would be
+/// unrepresentable; the caller's transaction then rolls back every earlier
+/// adjustment in the same call, so the totals stay consistent (#246).
+pub fn adjust_locked_for_balances(
+    env: &Env,
+    balances: &Map<Address, i128>,
+    sign: i128,
+) -> Result<(), WillError> {
     for (token, amount) in balances.iter() {
         if amount != 0 {
-            adjust_locked_value(env, &token, sign * amount);
+            let delta = checked_add_balance(0, sign * amount)?;
+            adjust_locked_value(env, &token, delta)?;
         }
     }
+    Ok(())
 }
 
 /// Returns `true` when a will in `status` still counts towards
@@ -510,7 +541,7 @@ pub fn recompute_protocol_stats_chunk(
     env: &Env,
     start_id: u64,
     batch_size: u32,
-) -> (ProtocolStats, u64, bool) {
+) -> Result<(ProtocolStats, u64, bool), WillError> {
     let last_id: u64 = env
         .storage()
         .instance()
@@ -518,14 +549,14 @@ pub fn recompute_protocol_stats_chunk(
         .unwrap_or(0);
 
     if start_id > last_id || batch_size == 0 {
-        return (
+        return Ok((
             ProtocolStats {
                 active_will_count: 0,
                 total_locked_by_token: Vec::new(env),
             },
             start_id,
             true,
-        );
+        ));
     }
 
     let end_id = (start_id + batch_size as u64 - 1).min(last_id);
@@ -539,7 +570,8 @@ pub fn recompute_protocol_stats_chunk(
                 active_will_count += 1;
                 for (token, amount) in will.balances.iter() {
                     let prev = totals.get(token.clone()).unwrap_or(0);
-                    totals.set(token, prev + amount);
+                    let next = checked_add_balance(prev, amount)?;
+                    totals.set(token, next);
                 }
             }
         }
@@ -557,14 +589,14 @@ pub fn recompute_protocol_stats_chunk(
     let next_id = end_id + 1;
     let is_complete = next_id > last_id;
 
-    (
+    Ok((
         ProtocolStats {
             active_will_count,
             total_locked_by_token,
         },
         next_id,
         is_complete,
-    )
+    ))
 }
 
 /// Recomputes protocol statistics from scratch by walking every will id ever
@@ -580,7 +612,7 @@ pub fn recompute_protocol_stats_chunk(
 /// This function is explicitly scoped to **off-chain simulation** (e.g. via RPC `simulateTransaction`)
 /// or local audit helpers. For on-chain execution, use [`recompute_protocol_stats_chunk`] to paginate
 /// through the ID space within the per-transaction budget.
-pub fn recompute_protocol_stats(env: &Env) -> ProtocolStats {
+pub fn recompute_protocol_stats(env: &Env) -> Result<ProtocolStats, WillError> {
     let last_id: u64 = env
         .storage()
         .instance()
@@ -596,7 +628,8 @@ pub fn recompute_protocol_stats(env: &Env) -> ProtocolStats {
                 active_will_count += 1;
                 for (token, amount) in will.balances.iter() {
                     let prev = totals.get(token.clone()).unwrap_or(0);
-                    totals.set(token, prev + amount);
+                    let next = checked_add_balance(prev, amount)?;
+                    totals.set(token, next);
                 }
             }
         }
@@ -623,10 +656,10 @@ pub fn recompute_protocol_stats(env: &Env) -> ProtocolStats {
         });
     }
 
-    ProtocolStats {
+    Ok(ProtocolStats {
         active_will_count,
         total_locked_by_token,
-    }
+    })
 }
 
 /// Compares stored protocol stats against a fresh full-scan recomputation,
@@ -644,7 +677,7 @@ pub fn recompute_protocol_stats(env: &Env) -> ProtocolStats {
 pub fn compare_protocol_stats(
     env: &Env,
     stored: &ProtocolStats,
-) -> (bool, Vec<TokenLockedBalance>, u64) {
+) -> Result<(bool, Vec<TokenLockedBalance>, u64), WillError> {
     let last_id: u64 = env
         .storage()
         .instance()
@@ -662,7 +695,8 @@ pub fn compare_protocol_stats(
                 computed_active += 1;
                 for (token, amount) in will.balances.iter() {
                     let prev = computed_totals.get(token.clone()).unwrap_or(0);
-                    computed_totals.set(token, prev + amount);
+                    let next = checked_add_balance(prev, amount)?;
+                    computed_totals.set(token, next);
                 }
             }
         }
@@ -695,7 +729,7 @@ pub fn compare_protocol_stats(
         }
     }
 
-    (consistent, discrepancies, computed_active)
+    Ok((consistent, discrepancies, computed_active))
 }
 
 /// Persists a will's state, refreshing its storage TTL unless the will has

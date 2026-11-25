@@ -8,6 +8,14 @@ name: Scripts Check
 # deployment logic an actual end-to-end smoke test rather than just a
 # syntax check.
 #
+# Issue #249: the lifecycle-integration job runs scripts/integration_test.sh
+# end-to-end against an isolated local network.  It is independent of the
+# deploy-sandbox and spec-freshness jobs and does not rely on the removed
+# `--features opt` stellar-cli install; it reuses the same pinned toolchain
+# (wasm32v1-none target + `cargo install --locked stellar-cli`) as the other
+# jobs and performs bounded cleanup so a failing create/check-in/cancel stage
+# is diagnosable from the logs.
+#
 # Issue #296: the offline-suite step runs scripts/test/run-offline-suite.sh,
 # a command-stub harness that checks exit propagation, cleanup and command
 # ordering without a network, identity, Docker daemon or deployment.
@@ -17,12 +25,6 @@ name: Scripts Check
 # expression contexts, unsupported workflow keys and bad action inputs
 # before GitHub ever interprets them.  The same command is available
 # locally via scripts/check-workflows.sh.
-#
-# The integration-test job that used to run integration_test.sh end-to-end
-# against a local Soroban network was removed: it depended on installing
-# stellar-cli with `--features opt`, a feature that no longer exists on the
-# stellar-cli version CI installs, so the job could never succeed regardless
-# of anything in this repo.
 
 on:
   push:

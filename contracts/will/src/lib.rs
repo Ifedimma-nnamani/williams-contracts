@@ -6595,6 +6595,23 @@ fn total_checked_add(total: &mut u32, value: u32, env: &Env) {
     };
 }
 
+/// Adds two `i128` monetary amounts, panicking with the stable typed
+/// [`WillError::ArithmeticOverflow`] error instead of letting the host abort
+/// on an unrepresentable sum (#246).
+///
+/// Two individually representable balances need not have a representable
+/// sum, and the release profile enables overflow checks, so a raw `a + b` on
+/// accounting amounts would trap with an opaque host arithmetic error. Every
+/// monetary accumulation boundary (owner statistics, merge totals, split
+/// duplicate-token accumulation, locked-value adjustment) goes through this
+/// helper so callers get one documented, actionable error.
+fn checked_add_amount(env: &Env, a: i128, b: i128) -> i128 {
+    match a.checked_add(b) {
+        Some(sum) => sum,
+        None => panic_with_error!(env, WillError::ArithmeticOverflow),
+    }
+}
+
 /// Sums every locked amount in a will's `balances` map.
 ///
 /// Used by `merge_beneficiaries` to weigh each will's beneficiaries against
@@ -7442,19 +7459,13 @@ fn assert_not_self_address(env: &Env, addr: &Address) {
 /// cannot express); and two percentages collapse to `existing`, whose basis
 /// points are only advisory here — `merge_beneficiaries` recomputes them from
 /// the merged shares anyway.
-fn merge_allocation(
-    env: &Env,
-    existing: &Allocation,
-    incoming: &Allocation,
-) -> Allocation {
+fn merge_allocation(env: &Env, existing: &Allocation, incoming: &Allocation) -> Allocation {
     match (existing, incoming) {
         (Allocation::FixedAmount(amt_a), Allocation::FixedAmount(amt_b)) => {
-            // Issue #208: never let an overcommitted pair of fixed amounts
-            // wrap to a saturated value that later passes validation.
-            let total = amt_a
-                .checked_add(*amt_b)
-                .unwrap_or_else(|| panic_with_error!(env, WillError::ArithmeticOverflow));
-            Allocation::FixedAmount(total)
+            // Fixed amounts are monetary accounting values: an unrepresentable
+            // sum is rejected with the typed overflow error rather than
+            // clamped (#246, #208).
+            Allocation::FixedAmount(checked_add_amount(env, *amt_a, *amt_b))
         }
         (Allocation::FixedAmount(amt), _) => Allocation::FixedAmount(*amt),
         (_, Allocation::FixedAmount(amt)) => Allocation::FixedAmount(*amt),
@@ -7476,7 +7487,10 @@ fn merge_allocation(
 fn merge_beneficiaries(env: &Env, will_a: &Will, will_b: &Will) -> Vec<Beneficiary> {
     let value_a = total_balance(&will_a.balances);
     let value_b = total_balance(&will_b.balances);
-    let total_value = value_a.saturating_add(value_b);
+    // Checked rather than saturating: an unrepresentable combined total must
+    // surface as the typed overflow error (#246) before any state is touched,
+    // not silently clamp and skew the derived percentages.
+    let total_value = checked_add_amount(env, value_a, value_b);
     let mut beneficiary_shares: Vec<(Address, i128)> = Vec::new(env);
     let mut beneficiary_allocations: Vec<(Address, Allocation)> = Vec::new(env);
 
@@ -7497,7 +7511,7 @@ fn merge_beneficiaries(env: &Env, will_a: &Will, will_b: &Will) -> Vec<Beneficia
             for i in 0..beneficiary_shares.len() {
                 let (addr, existing_share) = beneficiary_shares.get(i).unwrap();
                 if addr == beneficiary.address {
-                    let merged = existing_share.saturating_add(share);
+                    let merged = checked_add_amount(env, existing_share, share);
                     // Track original allocation type: prefer FixedAmount if
                     // either will has it.
                     let existing_alloc = beneficiary_allocations.get(i).unwrap().1;
