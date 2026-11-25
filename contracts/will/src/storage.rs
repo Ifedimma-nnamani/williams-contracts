@@ -220,6 +220,73 @@ pub fn set_total_locked(env: &Env, token: &Address, amount: i128) {
     }
 }
 
+/// Refreshes the TTL of a `TotalLocked(token)` entry if it exists and is non-zero.
+///
+/// # Maintenance Policy
+///
+/// Discrete `TotalLocked(token)` entries are created when their values change (`set_total_locked`,
+/// `adjust_locked_value`). Read-only operations like `check_in` and `get_total_locked` do not
+/// refresh the entry's TTL, so a long-lived will with a stable token balance can see its
+/// aggregate record expire to network archival even though the will itself remains active.
+///
+/// This function implements a **bounded keepalive policy** for active token aggregates:
+///
+/// 1. **During active maintenance** (`check_in`, emergency check-ins): call `refresh_total_locked_ttl`
+///    for every token in the will's balances. This ensures that active wills keep their token
+///    aggregates alive as long as they remain active.
+/// 2. **Zero/inactive aggregates**: if a token's total is zero or the entry does not exist in
+///    persistent storage, the function returns without action. This prevents unnecessary
+///    writes for inactive aggregates.
+/// 3. **Bounded cost**: the function performs a single read + conditional write per token,
+///    linear in the will's token count (capped at `MAX_TOKENS = 10`), so the cost is
+///    constant and does not scale with protocol size.
+///
+/// # Rationale
+///
+/// - Calls during status transitions that **change state** (`create_will`, `top_up`, `cancel_will`,
+///   `release_inheritance`) already refresh TTL via `adjust_locked_value`, so no additional
+///   call is needed there.
+/// - Calls during **read-like operations** (`get_total_locked`, `get_protocol_stats`) do not
+///   refresh; this is intentional (they should be read-only and not pay write overhead).
+/// - Calls during **periodic maintenance** (`check_in`, `emergency_checkin`, any scheduled
+///   refresh operation) should refresh to keep active aggregates current, since the will itself
+///   is demonstrably live at those moments.
+/// - A will that is `Active` or `Triggered` but has never moved its tokens (balances unchanged,
+///   no top-ups, no cancellations) would otherwise have a `TotalLocked` entry that expires
+///   independently of the will, eventually becoming inaccessible (archived on-chain), though
+///   the will's balances and the protocol statistics remain correct at query time.
+pub fn refresh_total_locked_ttl(env: &Env, token: &Address) {
+    let key = DataKey::TotalLocked(token.clone());
+    // Attempt to read the entry from persistent storage. Only refresh TTL if it exists
+    // and is non-zero (zero entries are always removed, not stored).
+    if let Some(amount) = env.storage().persistent().get::<_, i128>(&key) {
+        if amount != 0 {
+            env.storage()
+                .persistent()
+                .extend_ttl(&key, LIFETIME_THRESHOLD, BUMP_AMOUNT);
+        }
+    }
+}
+
+/// Refreshes the TTL of all `TotalLocked(token)` entries for every token in a will's balances.
+///
+/// **Intended usage**: call this during active maintenance operations (e.g. `check_in`,
+/// `emergency_checkin`) to keep an active will's token aggregates alive.
+///
+/// For each token in `balances` whose aggregate entry exists and is non-zero, this function
+/// extends its TTL to `(LIFETIME_THRESHOLD, BUMP_AMOUNT)` without modifying the balance value.
+/// If the entry does not exist or is zero, it is skipped (no write).
+///
+/// # Cost
+///
+/// O(N) in the number of distinct tokens in `balances`, where N <= `MAX_TOKENS` (capped at 10).
+/// Each token requires one persistent read + one conditional extend_ttl operation.
+pub fn refresh_total_locked_ttl_for_balances(env: &Env, balances: &Map<Address, i128>) {
+    for (token, _) in balances.iter() {
+        refresh_total_locked_ttl(env, &token);
+    }
+}
+
 /// Loads the list of tokens with active locked balances.
 pub fn get_protocol_tokens(env: &Env) -> Vec<Address> {
     if let Some(tokens) = env.storage().instance().get(&DataKey::ProtocolTokens) {

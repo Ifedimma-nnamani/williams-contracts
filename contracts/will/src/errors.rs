@@ -71,25 +71,10 @@ pub enum WillError {
     /// Raised when a deposit, allocation or transfer amount is not strictly
     /// positive.
     ZeroAmount = 11,
-    /// Too many beneficiaries (or guardians/tokens) were supplied, or the list
-    /// was empty. A will may name at most `MAX_BENEFICIARIES` (10)
-    /// beneficiaries; see the README FAQ for why the cap exists.
-    /// A list-length cap was exceeded. Raised by:
-    /// - a `beneficiaries` list that is empty or longer than
-    ///   `MAX_BENEFICIARIES` — `create_will`, `update_beneficiaries`,
-    ///   `update_will_settings` and each `batch_create_wills` spec;
-    /// - a `renounce_beneficiary` call that would leave the will with no
-    ///   beneficiaries at all: the last remaining beneficiary cannot renounce,
-    ///   because a will with an empty list would have nobody for
-    ///   `release_inheritance` to pay (#361);
-    /// - a `guardians` list longer than `MAX_GUARDIANS` — from
-    ///   `assert_valid_guardians`, reached by every entry point that installs
-    ///   or replaces a guardian list;
-    /// - a `batch_create_wills` spec list that is empty or longer than
-    ///   `BATCH_MAX`.
+    /// The beneficiary count is outside the bounds for the operation.
     ///
-    /// Token-list bounds are deliberately *not* reported here: an empty or
-    /// over-long `tokens` list raises [`WillError::InvalidTokenCount`] (#390).
+    /// Creation and updates cap the list at ten. Renouncing the only
+    /// remaining beneficiary would leave the will without a payout recipient.
     TooManyBeneficiaries = 12,
     /// The requested action requires the will to be `Released`, `Cancelled` or
     /// `Settled` (a will closed via `close_will`).

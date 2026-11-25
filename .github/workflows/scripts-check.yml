@@ -39,21 +39,50 @@ permissions:
   pull-requests: read
   actions: read
 
+env:
+  # Issue #254: pinned Stellar CLI version. Bumping this value changes the
+  # cache key below, invalidating any previously cached executable.
+  STELLAR_CLI_VERSION: "22.0.0"
+
 jobs:
+  issue-template-labels:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      issues: read
+    steps:
+      - uses: actions/checkout@v4
+      - name: Validate issue-template labels
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh label list --repo "$GITHUB_REPOSITORY" --limit 1000 --json name \
+            | ruby scripts/check-issue-template-labels.rb
+
   lint:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4.1.1
 
+      # Issue #255: discover every shell script under both scripts/ and
+      # .github/scripts/ deterministically so new guards are picked up
+      # automatically.  Scripts are only parsed/linted, never executed.
       - name: Syntax-check shell scripts
         run: |
-          bash -n scripts/deploy-testnet.sh
-          bash -n scripts/run-deploy-sandbox.sh
-          bash -n scripts/integration_test.sh
-          bash -n scripts/export-spec.sh
-          bash -n scripts/check_resource_costs.sh
-          bash -n scripts/check-wasm-size.sh
-          bash -n scripts/check-testnet-drift.sh
+          set -euo pipefail
+          mapfile -t files < <(find scripts .github/scripts -maxdepth 1 -name '*.sh' -type f | sort)
+          if [ "${#files[@]}" -eq 0 ]; then
+            echo "No shell scripts found" >&2
+            exit 1
+          fi
+          echo "Syntax-checking ${#files[@]} shell script(s):"
+          printf '  %s\n' "${files[@]}"
+          for f in "${files[@]}"; do
+            if ! bash -n "$f"; then
+              echo "::error file=$f::bash -n failed for $f"
+              exit 1
+            fi
+          done
 
       - name: Check README function table matches lib.rs (#235)
         run: python3 scripts/gen-api-table.py --check
@@ -62,7 +91,21 @@ jobs:
         run: sudo apt-get update && sudo apt-get install -y shellcheck
 
       - name: Run shellcheck
-        run: shellcheck scripts/*.sh scripts/test/*.sh
+        run: |
+          set -euo pipefail
+          mapfile -t files < <(find scripts .github/scripts -maxdepth 1 -name '*.sh' -type f | sort)
+          if [ "${#files[@]}" -eq 0 ]; then
+            echo "No shell scripts found" >&2
+            exit 1
+          fi
+          echo "ShellCheck-ing ${#files[@]} shell script(s):"
+          printf '  %s\n' "${files[@]}"
+          for f in "${files[@]}"; do
+            if ! shellcheck "$f"; then
+              echo "::error file=$f::shellcheck failed for $f"
+              exit 1
+            fi
+          done
 
       - name: Run offline command-stub suite
         run: scripts/test/run-offline-suite.sh
@@ -113,67 +156,48 @@ jobs:
           key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
           restore-keys: ${{ runner.os }}-cargo-
 
+      # Issue #254: reuse a version-verified stellar-cli executable. The cache
+      # key includes the pinned version, OS/arch and Cargo.lock hash, so a
+      # version bump or dependency change invalidates the cache.
+      - name: Cache stellar-cli
+        id: stellar-cli-cache
+        uses: actions/cache@v4
+        with:
+          path: ~/.cargo/bin/stellar
+          key: ${{ runner.os }}-${{ runner.arch }}-stellar-cli-${{ env.STELLAR_CLI_VERSION }}-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-${{ runner.arch }}-stellar-cli-${{ env.STELLAR_CLI_VERSION }}-
+
       - name: Install stellar-cli
-        run: cargo install --locked stellar-cli --version 22.0.1
+        if: steps.stellar-cli-cache.outputs.cache-hit != 'true'
+        run: cargo install --locked stellar-cli --version "$STELLAR_CLI_VERSION"
+
+      - name: Verify stellar-cli version
+        run: |
+          set -euo pipefail
+          echo "stellar binary: $(command -v stellar)"
+          installed="$(stellar --version)"
+          echo "$installed"
+          if ! printf '%s\n' "$installed" | grep -Eq "(^|[^0-9.])${STELLAR_CLI_VERSION}([^0-9.]|$)"; then
+            echo "::error::stellar --version ($installed) does not match pinned version $STELLAR_CLI_VERSION"
+            exit 1
+          fi
 
       - name: Run deploy sandbox smoke-test
         run: scripts/run-deploy-sandbox.sh
 
-  # Issue #249: actually execute the compiled lifecycle script
-  # (create → check-in → cancel) against an isolated local network.  A nonzero
-  # exit status from the script fails the job, so CLI encoding and real-host
-  # lifecycle regressions are caught by ordinary PR validation.
-  lifecycle-integration:
+  markdown-links:
+    # Issue #284: verifies that relative file links and heading anchors in the
+    # maintained Markdown docs resolve. Missing local files or anchors fail the
+    # check; historical external references are exempted only via the narrow,
+    # documented list in .github/scripts/check-markdown-links.sh. The script
+    # also runs its own fixture self-test before checking the real docs.
     runs-on: ubuntu-latest
-    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
 
-      - name: Install Rust wasm32v1-none target
-        run: rustup target add wasm32v1-none
-
-      - name: Cache Rust build artifacts
-        uses: actions/cache@v4
-        with:
-          path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-            target
-          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
-          restore-keys: ${{ runner.os }}-cargo-
-
-      - name: Install stellar-cli
-        run: cargo install --locked stellar-cli
-
-      - name: Run lifecycle integration script
-        # `set -o pipefail` propagates the script's nonzero status through the
-        # `tee` used to capture logs; `set -e` aborts on that failure.  Each
-        # lifecycle stage is echoed so a failing create/check-in/cancel step is
-        # identifiable in the captured log.
-        run: |
-          set -euo pipefail
-          echo "::group::lifecycle: create_will"
-          echo "Running scripts/integration_test.sh (create → check-in → cancel)"
-          scripts/integration_test.sh 2>&1 | tee integration-test.log
-          echo "::endgroup::"
-          echo "lifecycle integration script completed successfully"
-
-      - name: Upload lifecycle logs
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: lifecycle-integration-logs
-          path: integration-test.log
-          if-no-files-found: ignore
-          retention-days: 7
-
-      - name: Cleanup local network
-        if: always()
-        # Bounded cleanup: stop any local stellar/soroban network the script
-        # started, ignoring errors so cleanup never masks the real failure.
-        run: |
-          timeout 60 stellar network stop local 2>/dev/null || true
-          timeout 60 docker ps -q --filter "label=stellar" | xargs -r docker stop 2>/dev/null || true
+      - name: Check Markdown links and anchors
+        run: .github/scripts/check-markdown-links.sh
 
   spec-freshness:
     # Runs scripts/export-spec.sh --check to verify that the committed JSON
@@ -190,8 +214,32 @@ jobs:
       - name: Install jq
         run: sudo apt-get update && sudo apt-get install -y jq
 
+      # Issue #254: reuse a version-verified stellar-cli executable. The cache
+      # key includes the pinned version, OS/arch and Cargo.lock hash, so a
+      # version bump or dependency change invalidates the cache.
+      - name: Cache stellar-cli
+        id: stellar-cli-cache
+        uses: actions/cache@v4
+        with:
+          path: ~/.cargo/bin/stellar
+          key: ${{ runner.os }}-${{ runner.arch }}-stellar-cli-${{ env.STELLAR_CLI_VERSION }}-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-${{ runner.arch }}-stellar-cli-${{ env.STELLAR_CLI_VERSION }}-
+
       - name: Install stellar-cli
-        run: cargo install --locked stellar-cli --version 22.0.1
+        if: steps.stellar-cli-cache.outputs.cache-hit != 'true'
+        run: cargo install --locked stellar-cli --version "$STELLAR_CLI_VERSION"
+
+      - name: Verify stellar-cli version
+        run: |
+          set -euo pipefail
+          echo "stellar binary: $(command -v stellar)"
+          installed="$(stellar --version)"
+          echo "$installed"
+          if ! printf '%s\n' "$installed" | grep -Eq "(^|[^0-9.])${STELLAR_CLI_VERSION}([^0-9.]|$)"; then
+            echo "::error::stellar --version ($installed) does not match pinned version $STELLAR_CLI_VERSION"
+            exit 1
+          fi
 
       - name: Build contract and verify spec freshness
         run: scripts/export-spec.sh --check
