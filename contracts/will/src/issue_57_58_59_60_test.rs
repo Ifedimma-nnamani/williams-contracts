@@ -463,3 +463,47 @@ fn issue_59_seq_cursor_does_not_repeat_last_entry() {
         "second page seq must be strictly after the cursor"
     );
 }
+
+/// Issue #179: visible basis points must be normalised over the visible pool.
+/// Two 4,000-bps visible beneficiaries and one 2,000-bps hashed reserve on a
+/// 1,000-unit will must pay 400/400 and leave a 200-unit reserve — not
+/// 320/480 with the difference disguised as rounding dust.
+#[test]
+fn issue_179_mixed_allocations_conserve_material_shares() {
+    let (env, client, owner, token_address) = setup();
+    let visible_a = Address::generate(&env);
+    let visible_b = Address::generate(&env);
+
+    let will_id = client.create_will(
+        &owner,
+        &vec![&env, (token_address.clone(), 1_000_i128)],
+        &vec![
+            &env,
+            Beneficiary {
+                address: visible_a.clone(),
+                allocation: Allocation::Percentage(4_000),
+            },
+            Beneficiary {
+                address: visible_b.clone(),
+                allocation: Allocation::Percentage(4_000),
+            },
+        ],
+        &90,
+        &7,
+        &vec![&env],
+        &0,
+        &None,
+        &0,
+    );
+    client.add_hashed_beneficiary(&will_id, &owner, &sha256_commitment(&env, 0x79), &2_000);
+
+    advance(&env, 91);
+    client.trigger_will(&will_id);
+    advance(&env, 8);
+    client.release_inheritance(&will_id, &None);
+
+    let token_client = soroban_sdk::token::Client::new(&env, &token_address);
+    assert_eq!(token_client.balance(&visible_a), 400);
+    assert_eq!(token_client.balance(&visible_b), 400);
+    assert_eq!(client.get_will(&will_id).balances.get(token_address), Some(200));
+}

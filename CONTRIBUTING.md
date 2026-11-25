@@ -74,12 +74,11 @@ Run it locally before opening a PR:
 ./.github/scripts/check-contract-version.sh
 ```
 
-CI runs the same check on every PR (see the "Verify CONTRACT_VERSION matches
-git version tag" step in
-[.github/workflows/test.yml](./.github/workflows/test.yml)), so a PR that
-changes contract behavior without bumping `CONTRACT_VERSION`
-fails before it can be merged. This prevents the source constant from drifting
-away from the deployed contract version when deployment steps are skipped.
+The [Test & Build workflow](./.github/workflows/test.yml) runs the version
+check and, for pull requests, checks that `CHANGELOG.md` changes when
+`CONTRACT_VERSION` changes. The changelog guard compares the PR merge
+checkout with the base commit from the pull request event. Reviewers still
+verify that behavioral changes include a version bump.
 
 ## Storage schema versioning
 
@@ -105,7 +104,8 @@ decoding unless you also ship a migration path. The machinery is in
 |---|---|
 | 0 | Wills written before `schema_version` was populated. |
 | 1 | Layout with `keeper_bounty_bps` and `delegate`; no bounty-token selection. |
-| 2 | Current layout. Added `Will::keeper_bounty_token` (#109). |
+| 2 | Added `Will::keeper_bounty_token` (#109) and regrouped fields (#117). |
+| 3 | Current layout. Added `Will::grace_extension_days` (#102), decoded from frozen prior-v2 entries with a zero default (#176). |
 
 **To introduce version N+1** (for example, adding a field to `Will`):
 
@@ -215,6 +215,58 @@ per candidate mutation. To scope a run while iterating on a single file:
 cargo mutants --package will --file contracts/will/src/storage.rs
 ```
 
-Results are written to `mutants.out/` (or wherever `--output` poi
+Results are written to `mutants.out/` (or wherever `--output` points).
+Treat the report as advisory: review each surviving mutant and decide
+whether it reveals a missing test or is an equivalent mutant that no test
+can distinguish. Do not commit `mutants.out/`; it is a local artifact.
 
-/* … truncated 5094 chars — edit only what you need near the top … */
+## Updating `deployments/testnet.json` after a redeploy
+
+`deployments/testnet.json` records the contract IDs, Wasm hashes, and
+metadata for the current testnet deployment. After a redeploy, update it in
+the same PR as the deployment so the record never drifts from what is
+actually on-chain.
+
+1. Deploy the new Wasm and note the resulting contract ID and the Wasm hash
+   reported by the deploy tooling.
+2. Update the corresponding fields in `deployments/testnet.json` by hand.
+   Do **not** blindly copy generated output over the file — generated output
+   can drop fields, reorder keys, or carry stale values from a previous run.
+3. Review the diff locally before committing:
+   - Confirm the contract ID and Wasm hash match the deployment you just
+     performed.
+   - Confirm no unrelated entries changed.
+   - Confirm the file is still valid JSON and that any schema fields the
+     tooling expects are present.
+4. Run the repository checks that consume the file (for example
+   `./.github/scripts/check-contract-version.sh`) and confirm they pass.
+5. Commit the reviewed record with a message that names the redeploy, and
+   reference the deployment in the PR description.
+
+If a field's meaning is unclear, stop and ask a maintainer rather than
+guessing — an incorrect deployment record is worse than a missing one.
+
+## Handling a flagged security advisory
+
+`audit.toml` configures `cargo-audit` for this repository. When the scanner
+flags an advisory, triage it before touching the ignore list:
+
+1. **Understand the advisory.** Read the advisory entry (ID, affected
+   crate, affected versions, patched versions) and determine whether the
+   vulnerable code path is reachable from this workspace.
+2. **Prefer a fix.** If a patched version exists and can be adopted, upgrade
+   the dependency instead of ignoring the advisory.
+3. **Justify any exception.** If the advisory cannot be fixed now (for
+   example, no patched release exists, or the vulnerable path is provably
+   unreachable), you may add it to the ignore list in `audit.toml` only
+   together with:
+   - a written justification comment next to the entry explaining why the
+     advisory does not affect this repository and what would make it
+     applicable again, and
+   - a tracking issue (referenced in the comment) to remove the exception
+     once a fix is available.
+4. **Review locally.** Run the audit locally and confirm the remaining
+   output is understood before committing.
+
+Unjustified exceptions are not accepted. An ignore entry without a
+justification comment and a tracking issue will be rejected in review.

@@ -20,7 +20,9 @@ use soroban_sdk::{
 
 use crate::event_test_support as ev;
 use crate::storage::DataKey;
-use crate::{Allocation, Beneficiary, GuardianVoteReason, WillContract, WillContractClient};
+use crate::{
+    Allocation, Beneficiary, GuardianVoteReason, WillContract, WillContractClient,
+};
 
 const DAY: u64 = 86_400;
 
@@ -212,6 +214,70 @@ fn archive_will_rejects_active_will() {
     );
 
     client.archive_will(&will_id);
+}
+
+// ── Issues #212 / #214: read-only queries survive parent archival ────────
+
+/// Regression test for issues #212 and #214: the failed-payout amount query
+/// and the guardian cancellation-vote query must keep resolving after the
+/// parent will has been archived. Payout records and cancellation votes are
+/// deliberately independent of the parent will's lifecycle, so archival must
+/// not make them unreadable.
+#[test]
+fn read_only_queries_resolve_after_parent_archival() {
+    let (env, client, owner, token_address) = setup();
+    let beneficiary = Address::generate(&env);
+    let guardian = Address::generate(&env);
+
+    let will_id = client.create_will(
+        &owner,
+        &vec![&env, (token_address, 1_000_000_i128)],
+        &vec![
+            &env,
+            Beneficiary {
+                address: beneficiary.clone(),
+                allocation: Allocation::Percentage(10_000),
+            },
+        ],
+        &90,
+        &7,
+        &vec![&env, guardian.clone()],
+        &0,
+        &None,
+        &0,
+    );
+
+    // Before any failure or cancellation vote, both queries report empty.
+    assert_eq!(
+        client.get_failed_payout_amount(&will_id, &0),
+        None,
+        "no failed payout recorded yet"
+    );
+    assert_eq!(
+        client.get_guardian_cancel_vote_status(&will_id, &guardian),
+        None,
+        "no cancellation vote recorded yet"
+    );
+
+    // Cancel and archive the will so its storage entry is gone.
+    client.cancel_will(&will_id, &owner);
+    client.archive_will(&will_id);
+    assert!(
+        client.try_get_will(&will_id).is_err(),
+        "archived will's storage entry must be gone"
+    );
+
+    // Both read-only queries must still resolve without mutation.
+    assert_eq!(
+        client.get_failed_payout_amount(&will_id, &0),
+        None,
+        "failed-payout query must resolve after parent archival"
+    );
+    assert_eq!(
+        client.get_guardian_cancel_vote_status(&will_id, &guardian),
+        None,
+        "cancellation-vote query must resolve after parent archival"
+    );
 }
 
 // ── Issue #82: get_owner_status_page tolerates archived ids ──────────────

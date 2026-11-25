@@ -10,9 +10,7 @@ use soroban_sdk::{
     vec, Address, Env,
 };
 
-use crate::{
-    Allocation, Beneficiary, WillContract, WillContractClient, WillError, WillStatus,
-};
+use crate::{Allocation, Beneficiary, WillContract, WillContractClient, WillError, WillStatus};
 
 const DAY: u64 = 86_400;
 
@@ -70,7 +68,6 @@ fn request_grace_extension_stacks_without_status_reset() {
     env.mock_all_auths();
     env.ledger().set_timestamp(1_700_000_000);
 
-    let owner = Address::generate(&env);
     let heir = Address::generate(&env);
     let (client, owner, token_address) = setup(&env);
     let will_id = create_will(&env, &client, &owner, &token_address, &heir);
@@ -79,14 +76,13 @@ fn request_grace_extension_stacks_without_status_reset() {
     assert_eq!(client.get_will(&will_id).status, WillStatus::Triggered);
 
     // Request a 7-day extension while triggered.
-    client.request_grace_extension(&will_id, &owner, 7);
+    client.request_grace_extension(&will_id, &owner, &7);
+
+    client.request_grace_extension(&will_id, &owner, &3);
 
     let will = client.get_will(&will_id);
     assert_eq!(will.status, WillStatus::Triggered, "status stays Triggered");
-    assert_eq!(
-        will.grace_extension_days, 7,
-        "extension is recorded"
-    );
+    assert_eq!(will.grace_extension_days, 10, "extension is recorded");
 }
 
 #[test]
@@ -95,7 +91,6 @@ fn request_grace_extension_rejects_zero_days() {
     env.mock_all_auths();
     env.ledger().set_timestamp(1_700_000_000);
 
-    let owner = Address::generate(&env);
     let heir = Address::generate(&env);
     let (client, owner, token_address) = setup(&env);
     let will_id = create_will(&env, &client, &owner, &token_address, &heir);
@@ -103,7 +98,7 @@ fn request_grace_extension_rejects_zero_days() {
     trigger_will(&env, &client, will_id);
 
     let err = client
-        .try_request_grace_extension(&will_id, &owner, 0)
+        .try_request_grace_extension(&will_id, &owner, &0)
         .unwrap_err()
         .unwrap();
     assert_eq!(
@@ -119,7 +114,6 @@ fn request_grace_extension_rejects_above_max() {
     env.mock_all_auths();
     env.ledger().set_timestamp(1_700_000_000);
 
-    let owner = Address::generate(&env);
     let heir = Address::generate(&env);
     let (client, owner, token_address) = setup(&env);
     let will_id = create_will(&env, &client, &owner, &token_address, &heir);
@@ -127,7 +121,7 @@ fn request_grace_extension_rejects_above_max() {
     trigger_will(&env, &client, will_id);
 
     let err = client
-        .try_request_grace_extension(&will_id, &owner, 31)
+        .try_request_grace_extension(&will_id, &owner, &31)
         .unwrap_err()
         .unwrap();
     assert_eq!(
@@ -143,7 +137,6 @@ fn request_grace_extension_rejects_after_grace_expired() {
     env.mock_all_auths();
     env.ledger().set_timestamp(1_700_000_000);
 
-    let owner = Address::generate(&env);
     let heir = Address::generate(&env);
     let (client, owner, token_address) = setup(&env);
     let will_id = create_will(&env, &client, &owner, &token_address, &heir);
@@ -154,7 +147,7 @@ fn request_grace_extension_rejects_after_grace_expired() {
     advance(&env, 8);
 
     let err = client
-        .try_request_grace_extension(&will_id, &owner, 7)
+        .try_request_grace_extension(&will_id, &owner, &7)
         .unwrap_err()
         .unwrap();
     assert_eq!(

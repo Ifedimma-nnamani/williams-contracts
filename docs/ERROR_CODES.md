@@ -22,7 +22,7 @@ available discriminant; existing values are never changed.
 | 9 | `NotGuardian` | The caller is not a designated guardian of this will. |
 | 10 | `CheckinNotDue` | `trigger_will` was called before the check-in deadline passed. |
 | 11 | `ZeroAmount` | An amount of zero (or less) was supplied where a positive amount is required. |
-| 12 | `TooManyBeneficiaries` | A list-length cap was exceeded (beneficiaries, guardians, or batch spec list). |
+| 12 | `TooManyBeneficiaries` | The beneficiary list violates the applicable count bounds. Earlier deployments also used this code for guardian and creation-batch bounds. |
 | 13 | `WillNotSettled` | The requested action requires the will to be `Released`, `Cancelled` or `Settled`. |
 | 14 | `WillNotBothActive` | Cannot merge: one or both wills are not in `Active` status. |
 | 15 | `SameWillId` | Cannot merge: the same will id was provided for both wills. |
@@ -68,6 +68,8 @@ available discriminant; existing values are never changed.
 | 56 | `InvalidBountyToken` | `set_keeper_bounty_token` named a token the will does not currently hold. |
 | 57 | `NotAuthorized` | `redirect_failed_payout` was called by an address that is neither the recorded failed-payout recipient nor the will's owner. |
 | 58 | `UnclaimedHashedBeneficiary` | `archive_will` was called on a `Released` will that still has unclaimed hashed beneficiary shares. Archiving would destroy the will entry that `reveal_and_claim` needs to verify the commitment, permanently trapping those reserved funds. |
+| 59 | `NoFailedRefund` | `retry_failed_refund` was called for a token with no recorded deferred owner refund. |
+| 60 | `RefundNotDeferred` | `retry_failed_refund` was called for a token whose owner refund was already delivered, so there is nothing left to recover. |
 
 ## Notes
 
@@ -76,6 +78,11 @@ available discriminant; existing values are never changed.
   serialized on-chain data).
 - Codes are stable across contract upgrades. If a variant is ever retired, its
   discriminant is kept reserved rather than reused.
+- Owner refunds during `cancel_will`, `refund_unconfirmed_will` and
+  `guardian_cancel_pending_will` isolate per-token transfer failures: a token
+  that refuses delivery records a deferred refund (see `NoFailedRefund` /
+  `RefundNotDeferred`) instead of reverting the whole cancellation, and the
+  deferred amount is recoverable exactly once via `retry_failed_refund`.
 - Raw Soroban error codes are reported as `ContractError(u32)` in transaction
   simulation results and XDR `ScError` values. Match against the numeric code
   above to identify the variant.

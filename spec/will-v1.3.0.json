@@ -459,6 +459,13 @@
         "preimage: Bytes"
       ],
       "output": "()"
+    },
+    {
+      "name": "keepalive_claimable_will",
+      "inputs": [
+        "will_id: u64"
+      ],
+      "output": "()"
     }
   ],
   "types": {
@@ -531,6 +538,7 @@
       "checkin_period_days: u64",
       "grace_period_days: u64",
       "last_checkin: u64",
+      "trigger_cooldown_until: u64",
       "trigger_time: Option<u64>",
       "confirmation_deadline: Option<u64>",
       "status: WillStatus",
@@ -798,6 +806,10 @@
     },
     {
       "code": 58,
+      "name": "UnclaimedHashedBeneficiary"
+    },
+    {
+      "code": 59,
       "name": "InvalidDelegate"
     }
   ]

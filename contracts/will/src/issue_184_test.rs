@@ -10,7 +10,19 @@ use soroban_sdk::{
     vec, Address, Env, Vec as SorobanVec,
 };
 
-use crate::{Allocation, Beneficiary, WillContract, WillContractClient};
+use crate::{Allocation, Beneficiary, WillContract, WillContractClient, WillError};
+
+/// Issue #184: the restored `InvalidDelegate` variant must exist and must not
+/// reuse the established archival error code 58.
+#[test]
+fn delegate_and_archival_errors_have_distinct_stable_codes() {
+    assert_eq!(WillError::UnclaimedHashedBeneficiary as u32, 58);
+    assert_eq!(WillError::InvalidDelegate as u32, 59);
+    assert_ne!(
+        WillError::InvalidDelegate as u32,
+        WillError::UnclaimedHashedBeneficiary as u32
+    );
+}
 
 fn setup_with_two_tokens<'a>() -> (
     Env,

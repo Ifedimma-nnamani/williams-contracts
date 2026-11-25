@@ -6,6 +6,10 @@
 //!
 //! Also covers #126: reading the beneficiary reverse index must extend the
 //! TTL of the `BeneficiaryWills` entry so dormant indices are not archived.
+//!
+//! Also covers #192: `get_owner_status_page` with `limit == 0` must return an
+//! empty page with `next_cursor == None` instead of underflowing on
+//! `wills.len() - 1`.
 
 use soroban_sdk::{
     testutils::{Address as _, Ledger},
@@ -13,7 +17,7 @@ use soroban_sdk::{
     vec, Address, Env,
 };
 
-use crate::{Allocation, Beneficiary, WillContract, WillContractClient, WillError};
+use crate::{Allocation, Beneficiary, WillContract, WillContractClient, WillError, WillStatus};
 
 #[test]
 fn preserves_input_order_and_skips_missing_ids() {
@@ -196,4 +200,109 @@ fn get_wills_by_beneficiary_extends_index_ttl() {
         after > before,
         "beneficiary index TTL must be extended on read (before={before}, after={after})"
     );
+}
+
+#[test]
+fn owner_status_page_zero_limit_returns_empty_page() {
+    // #192: limit == 0 must not underflow on `wills.len() - 1`. Even for an
+    // owner with no wills, the empty vector satisfies `len() >= page_size`
+    // (0 >= 0), so the subtraction is evaluated before `Vec::get` can return
+    // None. The page must be empty with `next_cursor == None`.
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let contract_id = env.register(WillContract, ());
+    let client = WillContractClient::new(&env, &contract_id);
+    let owner = Address::generate(&env);
+
+    let page = client.get_owner_status_page(&owner, &WillStatus::Active, &None, &0);
+    assert!(page.wills.is_empty());
+    assert_eq!(page.next_cursor, None);
+}
+
+#[test]
+fn owner_status_page_zero_limit_with_populated_owner_returns_empty_page() {
+    // #192: a populated owner with limit == 0 must also return an empty page
+    // with `next_cursor == None`, not an arithmetic abort.
+    let env = Env::default();
+    env.mock_all_auths();
+    env.ledger().set_timestamp(1_700_000_000);
+
+    let owner = Address::generate(&env);
+    let sac = env.register_stellar_asset_contract_v2(owner.clone());
+    let token_address = sac.address();
+    StellarAssetClient::new(&env, &token_address).mint(&owner, &1_000_000);
+
+    let contract_id = env.register(WillContract, ());
+    let client = WillContractClient::new(&env, &contract_id);
+    let beneficiary = Address::generate(&env);
+
+    client.create_will(
+        &owner,
+        &vec![&env, (token_address.clone(), 1_000_000_i128)],
+        &vec![
+            &env,
+            Beneficiary {
+                address: beneficiary.clone(),
+                allocation: Allocation::Percentage(10_000),
+            },
+        ],
+        &90,
+        &7,
+        &vec![&env],
+        &0,
+        &None,
+        &0,
+    );
+
+    let page = client.get_owner_status_page(&owner, &WillStatus::Active, &None, &0);
+    assert!(page.wills.is_empty());
+    assert_eq!(page.next_cursor, None);
+}
+
+#[test]
+fn owner_status_page_positive_limit_retains_total_count_and_cursor() {
+    // #192: positive limits must retain total_count and continuation behavior.
+    let env = Env::default();
+    env.mock_all_auths();
+    env.ledger().set_timestamp(1_700_000_000);
+
+    let owner = Address::generate(&env);
+    let sac = env.register_stellar_asset_contract_v2(owner.clone());
+    let token_address = sac.address();
+    StellarAssetClient::new(&env, &token_address).mint(&owner, &3_000_000);
+
+    let contract_id = env.register(WillContract, ());
+    let client = WillContractClient::new(&env, &contract_id);
+    let beneficiary = Address::generate(&env);
+
+    for _ in 0..3 {
+        client.create_will(
+            &owner,
+            &vec![&env, (token_address.clone(), 1_000_000_i128)],
+            &vec![
+                &env,
+                Beneficiary {
+                    address: beneficiary.clone(),
+                    allocation: Allocation::Percentage(10_000),
+                },
+            ],
+            &90,
+            &7,
+            &vec![&env],
+            &0,
+            &None,
+            &0,
+        );
+    }
+
+    let page = client.get_owner_status_page(&owner, &WillStatus::Active, &None, &2);
+    assert_eq!(page.wills.len(), 2);
+    assert_eq!(page.total_count, 3);
+    assert!(page.next_cursor.is_some());
+
+    let next = client.get_owner_status_page(&owner, &WillStatus::Active, &page.next_cursor, &2);
+    assert_eq!(next.wills.len(), 1);
+    assert_eq!(next.total_count, 3);
+    assert_eq!(next.next_cursor, None);
 }

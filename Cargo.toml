@@ -9,6 +9,17 @@ exclude = ["fuzz"]
 [workspace.dependencies]
 soroban-sdk = { version = "28.0.0" }
 
+# Tested toolchain matrix (see docs/TOOLCHAIN.md for the full matrix and the
+# update procedure). The Rust version below must match rust-toolchain.toml;
+# the stellar-cli and quickstart image are pinned in the workflows and in
+# scripts/run-deploy-sandbox.sh respectively. Changing any of these requires
+# rerunning native/WASM/local-host validation.
+[workspace.metadata.toolchain]
+rust = "1.84.0"
+soroban-sdk = "28.0.0"
+stellar-cli = "22.0.0"
+quickstart-image = "stellar/quickstart:22.0.0"
+
 # Tuned for WASM binary size, since Soroban charges resource fees partly on
 # contract code size and a smaller binary is also marginally cheaper to
 # invoke. See docs/WASM_SIZE.md for the measurement procedure and the

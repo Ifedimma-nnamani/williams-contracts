@@ -93,6 +93,7 @@ fn distinct_ids_each_produce_exactly_one_check_in_event() {
     let (env, contract_id, owner, will_ids) = setup(N);
     let client = WillContractClient::new(&env, &contract_id);
 
+    env.ledger().with_mut(|l| l.timestamp += 60);
     client.batch_check_in(&will_ids, &owner);
 
     // The topic is `(symbol_short!("checkin"), will_id)`, so match on the
