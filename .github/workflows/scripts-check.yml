@@ -131,6 +131,19 @@ jobs:
       - name: Run deploy sandbox smoke-test
         run: scripts/run-deploy-sandbox.sh
 
+  markdown-links:
+    # Issue #284: verifies that relative file links and heading anchors in the
+    # maintained Markdown docs resolve. Missing local files or anchors fail the
+    # check; historical external references are exempted only via the narrow,
+    # documented list in .github/scripts/check-markdown-links.sh. The script
+    # also runs its own fixture self-test before checking the real docs.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Check Markdown links and anchors
+        run: .github/scripts/check-markdown-links.sh
+
   spec-freshness:
     # Runs scripts/export-spec.sh --check to verify that the committed JSON
     # snapshot in spec/ matches the compiled WASM bindings (#49). Any PR that

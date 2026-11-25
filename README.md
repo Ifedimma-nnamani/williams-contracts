@@ -366,7 +366,7 @@ In particular, `get_will_history` returns an empty trail for an archived will
 and must not be used as a post-archival recovery path. See
 [issue #393](https://github.com/Williams/williams-contracts/issues/393).
 
-## Error codes
+## Error Codes
 
 Every failure mode is a `#[contracterror]` variant of `WillError`
 (defined in [`contracts/will/src/errors.rs`](./contracts/will/src/errors.rs)),
