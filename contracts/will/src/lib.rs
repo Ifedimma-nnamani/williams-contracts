@@ -12,8 +12,6 @@ compile_error!("The `fuzzing` feature must not be enabled for wasm builds.");
 // inherits that arg count on a synthetic item the attribute doesn't reach
 // when placed on the source function or the impl block, so it's set crate-wide.
 #![allow(clippy::too_many_arguments)]
-#![allow(deprecated)]
-#![allow(clippy::needless_borrows_for_generic_args)]
 
 //! Williams — a trustless on-chain inheritance and dead man's switch protocol
 //! for Stellar Soroban.
@@ -51,6 +49,8 @@ compile_error!("The `fuzzing` feature must not be enabled for wasm builds.");
 
 mod batch_check_in_limit;
 mod errors;
+// Preserve the legacy topic and payload encoding used by existing indexers.
+#[allow(deprecated)]
 mod events;
 mod guardian_vote_freshness;
 mod migration;
@@ -225,6 +225,13 @@ mod issue_500_test;
 /// owner inactivity does not silently expire the index and strand will ids.
 #[cfg(test)]
 mod issue_41_test;
+
+/// Tests for ADR 0003: TotalLocked TTL maintenance policy. Verifies that
+/// `check_in`, `emergency_checkin`, and `batch_check_in` refresh the TTL of
+/// `TotalLocked(token)` entries so that active token aggregates do not expire
+/// to network archival while wills remain active.
+#[cfg(test)]
+mod total_locked_ttl_maintenance_test;
 
 /// Regression test for issue #184: `merge_wills` refuses mismatched primary tokens.
 #[cfg(test)]
@@ -784,17 +791,20 @@ impl WillContract {
     ///   the bounty is deducted proportionally from every token the will
     ///   holds (#109).
     ///
+    ///   A targeted token is stored on the will as `Will::keeper_bounty_token`
+    ///   (`Some(token)`), so callers — and the fuzz harness — can read back
+    ///   which token the bounty will be paid from. A successful
+    ///   `set_keeper_bounty_token` call therefore leaves the requested target
+    ///   active, and a rejected one leaves the previous selection untouched.
+    ///
     /// # Returns
     /// The newly allocated will id.
     ///
     /// # Panics
     /// - [`WillError::ZeroAmount`] if any token amount is not positive.
-    /// - [`WillError::TooManyBeneficiaries`] if the beneficiary/guardian/token lists are
-    ///   empty or exceed their respective caps (at most [`MAX_BENEFICIARIES`] = 10
-    ///   beneficiaries).
-    /// - [`WillError::InvalidPercentages`] if beneficiary basis points do not sum to 10,000.
-    /// - [`WillError::TooManyBeneficiaries`] if the beneficiary or guardian
-    ///   lists are empty or exceed their respective caps.
+    /// - [`WillError::TooManyBeneficiaries`] if the beneficiary list is empty or
+    ///   exceeds [`MAX_BENEFICIARIES`].
+    /// - [`WillError::TooManyGuardians`] if the guardian list exceeds [`MAX_GUARDIANS`].
     /// - [`WillError::InvalidTokenCount`] if the token list is empty or
     ///   exceeds `MAX_TOKENS`.
     /// - [`WillError::InvalidPercentages`] if the `Allocation::Percentage`
@@ -1757,6 +1767,12 @@ impl WillContract {
         );
         events::emergency_checkin(&env, will_id, &owner, next_deadline);
         storage::bump_instance_ttl(&env);
+
+        // Refresh TTL on the per-token aggregate entries (`TotalLocked(token)`) for every token
+        // the will holds, just as in `check_in`. The emergency check-in brings the will back to
+        // `Active` status and extends the check-in countdown, so its token aggregates should
+        // be kept alive to maintain consistency with the will's active state.
+        storage::refresh_total_locked_ttl_for_balances(&env, &will.balances);
     }
 
     /// Requests a temporary grace period extension during `Triggered` state
@@ -2669,7 +2685,7 @@ impl WillContract {
     /// # Panics
     /// - [`WillError::NotOwner`] if `owner` does not own `will_id`.
     /// - [`WillError::WillNotActive`] if the will is not `Active`.
-    /// - [`WillError::TooManyBeneficiaries`] if more than `MAX_GUARDIANS`
+    /// - [`WillError::TooManyGuardians`] if more than `MAX_GUARDIANS`
     ///   guardians are supplied.
     /// - [`WillError::InvalidGuardianThreshold`] if the new guardian list is
     ///   non-empty and the will's current `guardian_threshold` exceeds the new
@@ -4521,9 +4537,10 @@ impl WillContract {
     /// A `Vec<u64>` of newly allocated will ids, one per spec.
     ///
     /// # Panics
-    /// - [`WillError::TooManyBeneficiaries`] if the batch is empty or exceeds
-    ///   [`BATCH_MAX`], or if any individual spec violates the
-    ///   beneficiary/guardian caps.
+    /// - [`WillError::InvalidCreationBatchSize`] if the batch is empty or exceeds
+    ///   [`BATCH_MAX`].
+    /// - [`WillError::TooManyBeneficiaries`] or [`WillError::TooManyGuardians`]
+    ///   if an individual spec violates the corresponding list bounds.
     /// - [`WillError::InvalidTokenCount`] if any individual spec's token list
     ///   is empty or exceeds `MAX_TOKENS`.
     /// - [`WillError::InvalidToken`] if any token address in any spec fails
@@ -4546,7 +4563,7 @@ impl WillContract {
         owner.require_auth();
 
         if will_specs.is_empty() || will_specs.len() > BATCH_MAX {
-            panic_with_error!(&env, WillError::TooManyBeneficiaries);
+            panic_with_error!(&env, WillError::InvalidCreationBatchSize);
         }
 
         let mut ids = Vec::new(&env);
@@ -4879,16 +4896,20 @@ impl WillContract {
         // authorized caller. Checking the pair first means a caller who owns
         // only one of the two ids learns nothing about the other will beyond
         // "not yours", and can never fold their will into someone else's.
-        let will_a = load_will(&env, will_id_a);
-        let will_b = load_will(&env, will_id_b);
+        //
+        // Each source is loaded exactly once (#251): the owned records read
+        // here are the ones mutated below, so the merge does not pay a second
+        // full-Will decode of potentially large records. Soroban execution is
+        // single-invocation atomic, so nothing can mutate the records between
+        // this read and the writes at the end of the function.
+        let mut will_a = load_owned(&env, will_id_a, &owner);
+        let mut will_b = load_owned(&env, will_id_b, &owner);
         if will_a.owner != will_b.owner {
             panic_with_error!(&env, WillError::NotSameOwner);
         }
         if will_a.owner != owner {
             panic_with_error!(&env, WillError::NotOwner);
         }
-        let mut will_a = load_owned(&env, will_id_a, &owner);
-        let mut will_b = load_will(&env, will_id_b);
         if will_b.owner != owner {
             panic_with_error!(&env, WillError::NotSameOwner);
         }
@@ -6627,6 +6648,23 @@ fn total_checked_add(total: &mut u32, value: u32, env: &Env) {
     };
 }
 
+/// Adds two `i128` monetary amounts, panicking with the stable typed
+/// [`WillError::ArithmeticOverflow`] error instead of letting the host abort
+/// on an unrepresentable sum (#246).
+///
+/// Two individually representable balances need not have a representable
+/// sum, and the release profile enables overflow checks, so a raw `a + b` on
+/// accounting amounts would trap with an opaque host arithmetic error. Every
+/// monetary accumulation boundary (owner statistics, merge totals, split
+/// duplicate-token accumulation, locked-value adjustment) goes through this
+/// helper so callers get one documented, actionable error.
+fn checked_add_amount(env: &Env, a: i128, b: i128) -> i128 {
+    match a.checked_add(b) {
+        Some(sum) => sum,
+        None => panic_with_error!(env, WillError::ArithmeticOverflow),
+    }
+}
+
 /// Sums every locked amount in a will's `balances` map.
 ///
 /// Used by `merge_beneficiaries` to weigh each will's beneficiaries against
@@ -6664,7 +6702,7 @@ fn primary_token_balance(balances: &Map<Address, i128>, primary_token: &Address)
 /// owner is incapacitated or known to be dead.
 fn assert_valid_guardians(env: &Env, owner: &Address, guardians: &Vec<Address>) {
     if guardians.len() > MAX_GUARDIANS {
-        panic_with_error!(env, WillError::TooManyBeneficiaries);
+        panic_with_error!(env, WillError::TooManyGuardians);
     }
     for i in 0..guardians.len() {
         let guardian = guardians.get_unchecked(i);
@@ -7474,19 +7512,13 @@ fn assert_not_self_address(env: &Env, addr: &Address) {
 /// cannot express); and two percentages collapse to `existing`, whose basis
 /// points are only advisory here — `merge_beneficiaries` recomputes them from
 /// the merged shares anyway.
-fn merge_allocation(
-    env: &Env,
-    existing: &Allocation,
-    incoming: &Allocation,
-) -> Allocation {
+fn merge_allocation(env: &Env, existing: &Allocation, incoming: &Allocation) -> Allocation {
     match (existing, incoming) {
         (Allocation::FixedAmount(amt_a), Allocation::FixedAmount(amt_b)) => {
-            // Issue #208: never let an overcommitted pair of fixed amounts
-            // wrap to a saturated value that later passes validation.
-            let total = amt_a
-                .checked_add(*amt_b)
-                .unwrap_or_else(|| panic_with_error!(env, WillError::ArithmeticOverflow));
-            Allocation::FixedAmount(total)
+            // Fixed amounts are monetary accounting values: an unrepresentable
+            // sum is rejected with the typed overflow error rather than
+            // clamped (#246, #208).
+            Allocation::FixedAmount(checked_add_amount(env, *amt_a, *amt_b))
         }
         (Allocation::FixedAmount(amt), _) => Allocation::FixedAmount(*amt),
         (_, Allocation::FixedAmount(amt)) => Allocation::FixedAmount(*amt),
@@ -7508,7 +7540,10 @@ fn merge_allocation(
 fn merge_beneficiaries(env: &Env, will_a: &Will, will_b: &Will) -> Vec<Beneficiary> {
     let value_a = total_balance(&will_a.balances);
     let value_b = total_balance(&will_b.balances);
-    let total_value = value_a.saturating_add(value_b);
+    // Checked rather than saturating: an unrepresentable combined total must
+    // surface as the typed overflow error (#246) before any state is touched,
+    // not silently clamp and skew the derived percentages.
+    let total_value = checked_add_amount(env, value_a, value_b);
     let mut beneficiary_shares: Vec<(Address, i128)> = Vec::new(env);
     let mut beneficiary_allocations: Vec<(Address, Allocation)> = Vec::new(env);
 
@@ -7529,7 +7564,7 @@ fn merge_beneficiaries(env: &Env, will_a: &Will, will_b: &Will) -> Vec<Beneficia
             for i in 0..beneficiary_shares.len() {
                 let (addr, existing_share) = beneficiary_shares.get(i).unwrap();
                 if addr == beneficiary.address {
-                    let merged = existing_share.saturating_add(share);
+                    let merged = checked_add_amount(env, existing_share, share);
                     // Track original allocation type: prefer FixedAmount if
                     // either will has it.
                     let existing_alloc = beneficiary_allocations.get(i).unwrap().1;

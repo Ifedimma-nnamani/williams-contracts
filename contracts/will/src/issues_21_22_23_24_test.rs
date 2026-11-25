@@ -144,10 +144,10 @@ fn test_discrete_storage_keys_and_constant_gas_across_50_tokens() {
             .has(&DataKey::TotalLocked(token_0.clone())));
 
         // Profile CPU cost of updating an existing token when N = 1
-        env.budget().reset_default();
-        let cpu_before_1 = env.budget().cpu_instruction_cost();
+        env.cost_estimate().budget().reset_default();
+        let cpu_before_1 = env.cost_estimate().budget().cpu_instruction_cost();
         storage::adjust_locked_value(&env, token_0, 500);
-        let cpu_after_1 = env.budget().cpu_instruction_cost();
+        let cpu_after_1 = env.cost_estimate().budget().cpu_instruction_cost();
         let cost_at_1 = cpu_after_1 - cpu_before_1;
         assert!(
             cost_at_1 < 100_000,
@@ -171,22 +171,22 @@ fn test_discrete_storage_keys_and_constant_gas_across_50_tokens() {
 
         // Profile CPU cost of updating distinct tokens across the protocol when N = 50
         // (verifies constant gas and no positional vector-scan dependency)
-        env.budget().reset_default();
-        let cpu_before_first = env.budget().cpu_instruction_cost();
+        env.cost_estimate().budget().reset_default();
+        let cpu_before_first = env.cost_estimate().budget().cpu_instruction_cost();
         storage::adjust_locked_value(&env, token_0, 500);
-        let cpu_after_first = env.budget().cpu_instruction_cost();
+        let cpu_after_first = env.cost_estimate().budget().cpu_instruction_cost();
         let cost_first = cpu_after_first - cpu_before_first;
 
-        env.budget().reset_default();
-        let cpu_before_middle = env.budget().cpu_instruction_cost();
+        env.cost_estimate().budget().reset_default();
+        let cpu_before_middle = env.cost_estimate().budget().cpu_instruction_cost();
         storage::adjust_locked_value(&env, &tokens[25], 500);
-        let cpu_after_middle = env.budget().cpu_instruction_cost();
+        let cpu_after_middle = env.cost_estimate().budget().cpu_instruction_cost();
         let cost_middle = cpu_after_middle - cpu_before_middle;
 
-        env.budget().reset_default();
-        let cpu_before_last = env.budget().cpu_instruction_cost();
+        env.cost_estimate().budget().reset_default();
+        let cpu_before_last = env.cost_estimate().budget().cpu_instruction_cost();
         storage::adjust_locked_value(&env, &tokens[49], 500);
-        let cpu_after_last = env.budget().cpu_instruction_cost();
+        let cpu_after_last = env.cost_estimate().budget().cpu_instruction_cost();
         let cost_last = cpu_after_last - cpu_before_last;
 
         // Balance updates across 50 distinct tokens must be bounded and independent of token position

@@ -41,6 +41,12 @@ fmt-check:
 # audit.toml explicitly so local runs match CI. Requires cargo-audit:
 # `cargo install cargo-audit`.
 audit:
+    cargo audit --config audit.toml
+
+# Optional stricter audit mode: treats warnings (informational and
+# yanked-dependency advisories) as failures. This is NOT the CI
+# equivalent — use `just audit` for the same pass/fail policy as CI.
+audit-strict:
     cargo audit --config audit.toml --file Cargo.lock --deny warnings
 
 # Verify the exported contract spec is up to date (fails if stale).
